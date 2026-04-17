@@ -32,3 +32,10 @@ compose.desktop {
         mainClass = "com.gameton.app.MainKt"
     }
 }
+
+tasks.register<JavaExec>("runTestServer") {
+    group = "application"
+    description = "Run console test entrypoint for RestAPI"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.gameton.app.TestServerMainKt")
+}

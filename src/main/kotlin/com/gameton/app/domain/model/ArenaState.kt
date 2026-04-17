@@ -5,7 +5,7 @@ package com.gameton.app.domain.model
  */
 data class ArenaState(
     val turnNo: Int,
-    val nextTurnIn: Int,
+    val nextTurnIn: Double,
     val size: MapSize,
     val actionRange: Int,
     val plantations: List<Plantation> = emptyList(),
@@ -17,4 +17,3 @@ data class ArenaState(
     val plantationUpgrades: PlantationUpgrades? = null,
     val meteoForecasts: List<MeteoForecast> = emptyList()
 )
-

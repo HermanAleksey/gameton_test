@@ -8,10 +8,9 @@ package com.gameton.app.domain.model
 data class MeteoForecast(
     val kind: String,
     val turnsUntil: Int? = null,
-    val id: Int? = null,
+    val id: String? = null,
     val forming: Boolean? = null,
     val position: Coordinate? = null,
     val nextPosition: Coordinate? = null,
     val radius: Int? = null
 )
-

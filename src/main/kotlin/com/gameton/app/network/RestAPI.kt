@@ -51,6 +51,7 @@ object RestAPI {
 
     suspend fun sendCommand(request: CommandRequestDto): Result<CommandResponseDto> = safeCall {
         client.post("api/command") {
+            header("Content-Type", "application/json")
             setBody(request)
         }.body()
     }
