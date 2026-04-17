@@ -25,19 +25,26 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 
-object RestAPI {
-    private const val BASE_URL = "https://games-test.datsteam.dev/"
-    private const val AUTH_TOKEN = "5b9c9054-08c4-43ba-a588-0fb445278ca4"
+interface RestApi {
+    suspend fun getArena(): Result<ArenaResponseDto>
+    suspend fun sendCommand(request: CommandRequestDto): Result<CommandResponseDto>
+    suspend fun getLogs(): Result<LogsResponseDto>
+    fun close()
+}
 
+class KtorRestApi(
+    private val baseUrl: String,
+    private val authToken: String
+) : RestApi {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
     }
 
-    val client: HttpClient = HttpClient(CIO) {
+    private val client: HttpClient = HttpClient(CIO) {
         defaultRequest {
-            url.takeFrom(BASE_URL)
-            header("X-Auth-Token", AUTH_TOKEN)
+            url.takeFrom(baseUrl)
+            header("X-Auth-Token", authToken)
         }
 
         install(ContentNegotiation) {
@@ -45,18 +52,18 @@ object RestAPI {
         }
     }
 
-    suspend fun getArena(): Result<ArenaResponseDto> = safeCall {
+    override suspend fun getArena(): Result<ArenaResponseDto> = safeCall {
         client.get("api/arena").body()
     }
 
-    suspend fun sendCommand(request: CommandRequestDto): Result<CommandResponseDto> = safeCall {
+    override suspend fun sendCommand(request: CommandRequestDto): Result<CommandResponseDto> = safeCall {
         client.post("api/command") {
             header("Content-Type", "application/json")
             setBody(request)
         }.body()
     }
 
-    suspend fun getLogs(): Result<LogsResponseDto> = safeCall {
+    override suspend fun getLogs(): Result<LogsResponseDto> = safeCall {
         when (val rawResponse = client.get("api/logs").body<JsonElement>()) {
             is JsonArray -> {
                 val logs = rawResponse.map { json.decodeFromJsonElement<LogEntryDto>(it) }
@@ -72,11 +79,23 @@ object RestAPI {
         }
     }
 
+    override fun close() {
+        client.close()
+    }
+
     private suspend inline fun <T> safeCall(crossinline block: suspend () -> T): Result<T> {
         return runCatching { block() }
     }
+}
 
-    fun close() {
-        client.close()
-    }
+data class RestApiConfig(
+    val baseUrl: String = "https://games-test.datsteam.dev/",
+    val authToken: String = "5b9c9054-08c4-43ba-a588-0fb445278ca4"
+)
+
+fun createRestApi(config: RestApiConfig = RestApiConfig()): RestApi {
+    return KtorRestApi(
+        baseUrl = config.baseUrl,
+        authToken = config.authToken
+    )
 }

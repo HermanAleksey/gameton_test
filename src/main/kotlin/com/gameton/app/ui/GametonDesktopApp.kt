@@ -52,6 +52,7 @@ import androidx.compose.ui.input.pointer.pointerMoveFilter
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.gameton.app.di.AppContainer
 import com.gameton.app.ui.model.AlertViewModel
 import com.gameton.app.ui.model.ArenaViewState
 import com.gameton.app.ui.model.EntityKind
@@ -73,7 +74,8 @@ import kotlin.math.floor
 import kotlin.math.min
 
 @Composable
-fun GametonDesktopApp() {
+@Suppress("UNUSED_PARAMETER")
+fun GametonDesktopApp(appContainer: AppContainer) {
     DashboardTheme {
         val arena = remember { SampleArenaState.create() }
         var toggles by remember { mutableStateOf(arena.layerToggles.associate { it.kind to it.enabled }) }

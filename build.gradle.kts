@@ -30,6 +30,7 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "com.gameton.app.MainKt"
+//        mainClass = "com.gameton.app.TestServerMainKt"
     }
 }
 

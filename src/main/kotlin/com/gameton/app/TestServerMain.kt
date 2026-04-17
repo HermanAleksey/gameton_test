@@ -1,24 +1,26 @@
 package com.gameton.app
 
-import com.gameton.app.network.RestAPI
+import com.gameton.app.di.AppContainer
 import com.gameton.app.network.dto.CommandRequestDto
 import kotlinx.coroutines.runBlocking
 
 fun TestServerMain() = runBlocking {
     println("=== TestServerMain started ===")
+    val appContainer = AppContainer()
+    val restApi = appContainer.restApi
 
     try {
-        val arenaResult = RestAPI.getArena()
+        val arenaResult = restApi.getArena()
         arenaResult
             .onSuccess { arena ->
-                println("[getArena] success: turnNo=${arena.turnNo}, nextTurnIn=${arena.nextTurnIn}")
+                println("[getArena] success: turnNo=${arena.turnNo}, nextTurnIn=${arena.nextTurnIn} ${arena.size}")
             }
             .onFailure { error ->
                 println("[getArena] failure: ${error.message}")
                 error.printStackTrace()
             }
 
-        val logsResult = RestAPI.getLogs()
+        val logsResult = restApi.getLogs()
         logsResult
             .onSuccess { logs ->
                 println("[getLogs] success: ${logs::class.simpleName}")
@@ -28,7 +30,7 @@ fun TestServerMain() = runBlocking {
                 error.printStackTrace()
             }
 
-        val commandResult = RestAPI.sendCommand(CommandRequestDto())
+        val commandResult = restApi.sendCommand(CommandRequestDto())
         commandResult
             .onSuccess { response ->
                 println("[sendCommand] success: code=${response.code}, errors=${response.errors}")
@@ -38,7 +40,7 @@ fun TestServerMain() = runBlocking {
                 error.printStackTrace()
             }
     } finally {
-        RestAPI.close()
+        appContainer.close()
         println("=== TestServerMain finished ===")
     }
 }
