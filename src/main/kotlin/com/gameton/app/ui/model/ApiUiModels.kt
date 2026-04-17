@@ -45,7 +45,7 @@ data class PlantationUpgradesUi(
 )
 
 data class PlantationUi(
-    val id: Int,
+    val id: String,
     val position: UiCoordinate,
     val isMain: Boolean,
     val isIsolated: Boolean,
@@ -54,7 +54,7 @@ data class PlantationUi(
 )
 
 data class EnemyPlantationUi(
-    val id: Int,
+    val id: String,
     val position: UiCoordinate,
     val hp: Int
 )
@@ -71,7 +71,7 @@ data class ConstructionUi(
 )
 
 data class BeaverUi(
-    val id: Int,
+    val id: String,
     val position: UiCoordinate,
     val hp: Int
 )

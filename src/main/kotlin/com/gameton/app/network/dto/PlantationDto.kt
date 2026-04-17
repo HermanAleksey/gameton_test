@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class PlantationDto(
-    val id: Int,
+    val id: String,
     val position: List<Int>,
     val isMain: Boolean,
     val isIsolated: Boolean,
