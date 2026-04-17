@@ -1,6 +1,8 @@
 package com.gameton.app.ui
 
+import com.gameton.app.domain.capitan.DecisionMaker
 import com.gameton.app.network.RestApi
+import com.gameton.app.network.mapper.toDomainModel
 import com.gameton.app.network.mapper.toArenaViewState
 import com.gameton.app.network.mapper.toDto
 import com.gameton.app.network.mapper.toUiModel
@@ -15,12 +17,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class GametonController(
-    private val restApi: RestApi
+    private val restApi: RestApi,
+    private val decisionMaker: DecisionMaker
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _arenaState = MutableStateFlow<ArenaViewState>(SampleArenaState.create())
@@ -49,8 +53,18 @@ class GametonController(
         val result = restApi.getArena()
         result.onSuccess { arenaResponse ->
             _arenaState.value = arenaResponse.toArenaViewState()
+            val decision = withTimeoutOrNull(1_000) {
+                decisionMaker.makeTurn(arenaResponse.toDomainModel())
+            }
+            if (decision != null && !decision.isEmptyTurn()) {
+                sendCommand(decision)
+            }
         }.onFailure {
             // TODO SHOW ERROR
         }
     }
+}
+
+private fun CommandRequestUi.isEmptyTurn(): Boolean {
+    return command.isEmpty() && plantationUpgrade == null && relocateMain == null
 }
