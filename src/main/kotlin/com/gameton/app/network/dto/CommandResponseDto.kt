@@ -3,6 +3,7 @@ package com.gameton.app.network.dto
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class PlaceholderDto(
-    val placeholder: String = ""
+data class CommandResponseDto(
+    val code: Int,
+    val errors: List<String> = emptyList()
 )
