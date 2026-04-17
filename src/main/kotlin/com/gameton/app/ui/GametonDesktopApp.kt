@@ -30,6 +30,7 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,7 +66,6 @@ import com.gameton.app.ui.model.MapCellViewModel
 import com.gameton.app.ui.model.MapLayerToggleState
 import com.gameton.app.ui.model.RiskSeverity
 import com.gameton.app.ui.model.TerrainType
-import com.gameton.app.ui.sample.SampleArenaState
 import com.gameton.app.ui.theme.DashboardPalette
 import com.gameton.app.ui.theme.DashboardTheme
 import com.gameton.app.ui.theme.panelAlt
@@ -74,10 +74,9 @@ import kotlin.math.floor
 import kotlin.math.min
 
 @Composable
-@Suppress("UNUSED_PARAMETER")
 fun GametonDesktopApp(appContainer: AppContainer) {
     DashboardTheme {
-        val arena = remember { SampleArenaState.create() }
+        val arena by appContainer.gametonController.arenaState.collectAsState()
         var toggles by remember { mutableStateOf(arena.layerToggles.associate { it.kind to it.enabled }) }
         var selectedId by remember { mutableStateOf(arena.entities.firstOrNull { it.kind == EntityKind.MainPlantation }?.id) }
         var hoveredCell by remember { mutableStateOf<MapCellViewModel?>(null) }
