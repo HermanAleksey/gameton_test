@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ArenaResponseDto(
     val turnNo: Int,
-    val nextTurnIn: Int,
+    val nextTurnIn: Double,
     val size: List<Int>,
     val actionRange: Int,
     val plantations: List<PlantationDto> = emptyList(),
