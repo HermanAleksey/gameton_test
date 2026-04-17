@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,16 +43,19 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerMoveFilter
+import androidx.compose.ui.res.loadImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.gameton.app.di.AppContainer
 import com.gameton.app.ui.model.AlertViewModel
@@ -73,6 +77,13 @@ import com.gameton.app.ui.theme.severityColor
 import kotlin.math.floor
 import kotlin.math.min
 
+private const val DESERT_TILE_RESOURCE = "/sprites/StoneBlock.png"
+private const val MAP_VIEWPORT_WIDTH = 900f
+private const val MAP_VIEWPORT_HEIGHT = 620f
+private const val MIN_FOCUSED_ENTITY_ZOOM = 1.3f
+private const val MAX_CAMERA_ZOOM = 8f
+private const val TARGET_VISIBLE_CELLS_ON_FOCUS = 48f
+
 @Composable
 fun GametonDesktopApp(appContainer: AppContainer) {
     DashboardTheme {
@@ -89,6 +100,7 @@ fun GametonDesktopApp(appContainer: AppContainer) {
 
         val selectedEntity = arena.entities.firstOrNull { it.id == selectedId }
         val activeHighlight = pinnedLegend ?: legendHover
+        val ownEntities = remember(arena.entities) { sortedOwnEntities(arena.entities) }
 
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -133,15 +145,32 @@ fun GametonDesktopApp(appContainer: AppContainer) {
                         onSelectEntity = { selectedId = it },
                         onHoverEntity = { hoveredEntityId = it },
                         onHoverCell = { hoveredCell = it },
-                        onCenterOnHq = {
-                            centerOnEntity(
-                                arena.entities.first { it.kind == EntityKind.MainPlantation },
-                                arena,
-                                900f,
-                                620f
-                            )?.let {
-                                cameraOffset = it
-                                cameraScale = 1.3f
+                        ownNavigationEnabled = ownEntities.isNotEmpty(),
+                        onHqZoom = {
+                            ownEntities.firstOrNull { it.kind == EntityKind.MainPlantation }?.let { entity ->
+                                focusEntity(entity, arena, MAP_VIEWPORT_WIDTH, MAP_VIEWPORT_HEIGHT)?.let { focus ->
+                                    selectedId = focus.first
+                                    cameraOffset = focus.second
+                                    cameraScale = focusedZoom(arena)
+                                }
+                            }
+                        },
+                        onPrevOwn = {
+                            nextOwnEntity(selectedId, ownEntities, direction = -1)?.let { entity ->
+                                focusEntity(entity, arena, MAP_VIEWPORT_WIDTH, MAP_VIEWPORT_HEIGHT)?.let { focus ->
+                                    selectedId = focus.first
+                                    cameraOffset = focus.second
+                                    cameraScale = focusedZoom(arena)
+                                }
+                            }
+                        },
+                        onNextOwn = {
+                            nextOwnEntity(selectedId, ownEntities, direction = 1)?.let { entity ->
+                                focusEntity(entity, arena, MAP_VIEWPORT_WIDTH, MAP_VIEWPORT_HEIGHT)?.let { focus ->
+                                    selectedId = focus.first
+                                    cameraOffset = focus.second
+                                    cameraScale = focusedZoom(arena)
+                                }
                             }
                         },
                         onFitMap = {
@@ -151,7 +180,7 @@ fun GametonDesktopApp(appContainer: AppContainer) {
                         onNextAlert = {
                             alertIndex = (alertIndex + 1) % arena.alerts.size
                             arena.alerts.getOrNull(alertIndex)?.target?.let { target ->
-                                centerOnPoint(target, arena, 900f, 620f)?.let {
+                                centerOnPoint(target, arena, MAP_VIEWPORT_WIDTH, MAP_VIEWPORT_HEIGHT)?.let {
                                     cameraOffset = it
                                     selectedId = arena.entities.minByOrNull { distance(it.position, target) }?.id
                                 }
@@ -177,15 +206,25 @@ fun GametonDesktopApp(appContainer: AppContainer) {
 @Composable
 private fun TopStatusBar(arena: ArenaViewState) {
     Row(
-        modifier = Modifier.fillMaxWidth().background(DashboardPalette.Panel)
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(DashboardPalette.Panel)
             .padding(horizontal = 16.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(18.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("DatsSol Tactical Dashboard", style = MaterialTheme.typography.h6, color = MaterialTheme.colors.onSurface)
         StatusPill("Turn ${arena.turnNo}", DashboardPalette.Main)
         StatusPill("Next ${"%.2f".format(arena.nextTurnInSeconds)}s", DashboardPalette.Boosted)
+        StatusPill("AR ${arena.actionRange}", DashboardPalette.Construction)
         StatusPill(arena.connectionState, DashboardPalette.Oasis)
+        StatusPill("Own ${arena.ownCount}", DashboardPalette.Own)
+        StatusPill("Enemy ${arena.enemyCount}", DashboardPalette.Enemy)
+        StatusPill("Build ${arena.constructionCount}", DashboardPalette.Construction)
+        StatusPill("Beavers ${arena.beaverCount}", DashboardPalette.Beaver)
+        StatusPill("Meteo ${arena.meteoCount}", DashboardPalette.Sandstorm)
+        StatusPill(
+            if (arena.turnsUntilUpgrade != null) "Upgrade ${arena.upgradePoints} in ${arena.turnsUntilUpgrade}t" else "Upgrade ${arena.upgradePoints}",
+            DashboardPalette.Boosted
+        )
         StatusPill("${arena.warnings} warnings", severityColor(RiskSeverity.Warning))
         StatusPill("${arena.errors} errors", severityColor(RiskSeverity.High))
         Spacer(Modifier.weight(1f))
@@ -371,7 +410,10 @@ private fun MapPanel(
     onSelectEntity: (String?) -> Unit,
     onHoverEntity: (String?) -> Unit,
     onHoverCell: (MapCellViewModel?) -> Unit,
-    onCenterOnHq: () -> Unit,
+    ownNavigationEnabled: Boolean,
+    onHqZoom: () -> Unit,
+    onPrevOwn: () -> Unit,
+    onNextOwn: () -> Unit,
     onFitMap: () -> Unit,
     onNextAlert: () -> Unit,
     modifier: Modifier = Modifier
@@ -390,7 +432,9 @@ private fun MapPanel(
             Text("Карта", style = MaterialTheme.typography.h6)
             StatusPill("${arena.mapSize.first}x${arena.mapSize.second}", DashboardPalette.DesertSoft)
             Spacer(Modifier.weight(1f))
-            MiniAction("Center on HQ", onCenterOnHq)
+            MiniAction("HQ Zoom", onHqZoom, enabled = ownNavigationEnabled)
+            MiniAction("Prev own", onPrevOwn, enabled = ownNavigationEnabled)
+            MiniAction("Next own", onNextOwn, enabled = ownNavigationEnabled)
             MiniAction("Fit map", onFitMap)
             MiniAction("Next alert", onNextAlert)
         }
@@ -427,14 +471,25 @@ private fun MapPanel(
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun MiniAction(label: String, onClick: () -> Unit) {
+private fun MiniAction(label: String, onClick: () -> Unit, enabled: Boolean = true) {
     Box(
-        modifier = Modifier.background(MaterialTheme.colors.panelAlt, RoundedCornerShape(999.dp))
-            .border(1.dp, Color(0x22FFF1D3), RoundedCornerShape(999.dp))
-            .clickable(onClick = onClick)
+        modifier = Modifier.background(
+            if (enabled) MaterialTheme.colors.panelAlt else MaterialTheme.colors.panelAlt.copy(alpha = 0.45f),
+            RoundedCornerShape(999.dp)
+        )
+            .border(
+                1.dp,
+                if (enabled) Color(0x22FFF1D3) else Color(0x12FFF1D3),
+                RoundedCornerShape(999.dp)
+            )
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
-        Text(label, style = MaterialTheme.typography.caption)
+        Text(
+            label,
+            style = MaterialTheme.typography.caption,
+            color = if (enabled) MaterialTheme.colors.onSurface else DashboardPalette.TextMuted.copy(alpha = 0.8f)
+        )
     }
 }
 
@@ -457,6 +512,7 @@ private fun TacticalMapCanvas(
     modifier: Modifier = Modifier
 ) {
     var canvasSize by remember { mutableStateOf(Size.Zero) }
+    val desertTile = remember { loadBundledImage(DESERT_TILE_RESOURCE) }
     val filteredEntities = arena.entities.filter { entity ->
         when {
             layerToggles[LayerToggle.OnlyOwn] == true -> entity.kind in setOf(
@@ -488,7 +544,7 @@ private fun TacticalMapCanvas(
         modifier = modifier
             .onPointerEvent(PointerEventType.Scroll) {
                 val delta = it.changes.firstOrNull()?.scrollDelta?.y ?: 0f
-                val next = (cameraScale * if (delta < 0f) 1.08f else 0.92f).coerceIn(0.65f, 2.5f)
+                val next = (cameraScale * if (delta < 0f) 1.08f else 0.92f).coerceIn(0.65f, MAX_CAMERA_ZOOM)
                 onScaleChange(next)
             }
             .pointerInput(Unit) {
@@ -555,11 +611,20 @@ private fun TacticalMapCanvas(
                     TerrainType.Mountain -> DashboardPalette.Mountain
                     TerrainType.Oasis -> DashboardPalette.Desert
                 }
-                drawRect(
-                    color = baseColor.copy(alpha = 0.78f),
-                    topLeft = topLeft,
-                    size = Size(cellSize, cellSize)
-                )
+                if (cell.terrainType == TerrainType.Desert || cell.terrainType == TerrainType.Oasis) {
+                    drawDesertTile(
+                        tile = desertTile,
+                        topLeft = topLeft,
+                        cellSize = cellSize,
+                        fallbackColor = baseColor.copy(alpha = 0.88f)
+                    )
+                } else {
+                    drawRect(
+                        color = baseColor.copy(alpha = 0.78f),
+                        topLeft = topLeft,
+                        size = Size(cellSize, cellSize)
+                    )
+                }
 
                 if (layerToggles[LayerToggle.Terraforming] == true && cell.terraformationProgress > 0 && cell.terrainType != TerrainType.Mountain) {
                     val fillHeight = cellSize * (cell.terraformationProgress / 100f)
@@ -690,6 +755,34 @@ private fun TacticalMapCanvas(
             }
         }
     }
+}
+
+private fun loadBundledImage(path: String): ImageBitmap? {
+    return object {}.javaClass.getResourceAsStream(path)
+        ?.buffered()
+        ?.use(::loadImageBitmap)
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDesertTile(
+    tile: ImageBitmap?,
+    topLeft: Offset,
+    cellSize: Float,
+    fallbackColor: Color
+) {
+    if (tile == null) {
+        drawRect(
+            color = fallbackColor,
+            topLeft = topLeft,
+            size = Size(cellSize, cellSize)
+        )
+        return
+    }
+
+    drawImage(
+        image = tile,
+        dstOffset = IntOffset(topLeft.x.toInt(), topLeft.y.toInt()),
+        dstSize = IntSize(cellSize.toInt().coerceAtLeast(1), cellSize.toInt().coerceAtLeast(1))
+    )
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEntity(
@@ -1030,6 +1123,64 @@ private fun centerOnPoint(point: Offset, arena: ArenaViewState, viewportWidth: F
     val pointCenter =
         Offset(mapStart.x + point.x * cellSize + cellSize / 2f, mapStart.y + point.y * cellSize + cellSize / 2f)
     return Offset(viewportWidth / 2f - pointCenter.x, viewportHeight / 2f - pointCenter.y)
+}
+
+private fun focusEntity(
+    entity: EntityViewModel,
+    arena: ArenaViewState,
+    viewportWidth: Float,
+    viewportHeight: Float
+): Pair<String, Offset>? {
+    val offset = centerOnEntity(entity, arena, viewportWidth, viewportHeight) ?: return null
+    return entity.id to offset
+}
+
+private fun isOwnEntity(kind: EntityKind): Boolean = when (kind) {
+    EntityKind.MainPlantation,
+    EntityKind.OwnPlantation,
+    EntityKind.IsolatedPlantation,
+    EntityKind.Construction -> true
+
+    else -> false
+}
+
+private fun sortedOwnEntities(entities: List<EntityViewModel>): List<EntityViewModel> {
+    val priority = mapOf(
+        EntityKind.MainPlantation to 0,
+        EntityKind.OwnPlantation to 1,
+        EntityKind.IsolatedPlantation to 1,
+        EntityKind.Construction to 2
+    )
+    return entities
+        .asSequence()
+        .filter { isOwnEntity(it.kind) }
+        .sortedWith(
+            compareBy<EntityViewModel>(
+                { priority[it.kind] ?: Int.MAX_VALUE },
+                { it.position.y },
+                { it.position.x },
+                { it.id }
+            )
+        )
+        .toList()
+}
+
+private fun nextOwnEntity(currentId: String?, ownEntities: List<EntityViewModel>, direction: Int): EntityViewModel? {
+    if (ownEntities.isEmpty()) return null
+    val currentIndex = ownEntities.indexOfFirst { it.id == currentId }
+    val startIndex = if (currentIndex == -1) {
+        ownEntities.indexOfFirst { it.kind == EntityKind.MainPlantation }.takeIf { it >= 0 } ?: 0
+    } else {
+        currentIndex
+    }
+    val nextIndex = (startIndex + direction).mod(ownEntities.size)
+    return ownEntities[nextIndex]
+}
+
+private fun focusedZoom(arena: ArenaViewState): Float {
+    val largestDimension = maxOf(arena.mapSize.first, arena.mapSize.second).toFloat()
+    val adaptiveZoom = largestDimension / TARGET_VISIBLE_CELLS_ON_FOCUS
+    return adaptiveZoom.coerceIn(MIN_FOCUSED_ENTITY_ZOOM, MAX_CAMERA_ZOOM)
 }
 
 private fun distance(a: Offset, b: Offset): Float {
