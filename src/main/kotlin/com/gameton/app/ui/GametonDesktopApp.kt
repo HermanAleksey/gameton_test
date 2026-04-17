@@ -35,6 +35,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -81,6 +82,7 @@ private const val DESERT_TILE_RESOURCE = "/sprites/StoneBlock.png"
 private const val MAP_VIEWPORT_WIDTH = 900f
 private const val MAP_VIEWPORT_HEIGHT = 620f
 private const val MIN_FOCUSED_ENTITY_ZOOM = 1.3f
+private const val MIN_CAMERA_ZOOM = 0.65f
 private const val MAX_CAMERA_ZOOM = 8f
 private const val TARGET_VISIBLE_CELLS_ON_FOCUS = 48f
 
@@ -512,6 +514,7 @@ private fun TacticalMapCanvas(
     modifier: Modifier = Modifier
 ) {
     var canvasSize by remember { mutableStateOf(Size.Zero) }
+    val latestCameraOffset by rememberUpdatedState(cameraOffset)
     val desertTile = remember { loadBundledImage(DESERT_TILE_RESOURCE) }
     val filteredEntities = arena.entities.filter { entity ->
         when {
@@ -543,15 +546,48 @@ private fun TacticalMapCanvas(
     Canvas(
         modifier = modifier
             .onPointerEvent(PointerEventType.Scroll) {
-                val delta = it.changes.firstOrNull()?.scrollDelta?.y ?: 0f
-                val next = (cameraScale * if (delta < 0f) 1.08f else 0.92f).coerceIn(0.65f, MAX_CAMERA_ZOOM)
-                onScaleChange(next)
+                val change = it.changes.firstOrNull() ?: return@onPointerEvent
+                if (canvasSize == Size.Zero) return@onPointerEvent
+
+                val delta = change.scrollDelta.y
+                if (delta == 0f) return@onPointerEvent
+
+                val previousScale = cameraScale
+                val nextScale = (previousScale * if (delta < 0f) 1.08f else 0.92f).coerceIn(MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM)
+                if (nextScale == previousScale) return@onPointerEvent
+
+                val baseCellSize = min(
+                    canvasSize.width / arena.mapSize.first,
+                    canvasSize.height / arena.mapSize.second
+                )
+                val previousCellSize = baseCellSize * previousScale
+                val nextCellSize = baseCellSize * nextScale
+
+                val previousOrigin = mapOrigin(canvasSize, arena.mapSize, previousCellSize, cameraOffset)
+                val pointerPosition = change.position
+                val focusedCellX = (pointerPosition.x - previousOrigin.x) / previousCellSize
+                val focusedCellY = (pointerPosition.y - previousOrigin.y) / previousCellSize
+
+                val centeredOriginX = (canvasSize.width - arena.mapSize.first * nextCellSize) / 2f
+                val centeredOriginY = (canvasSize.height - arena.mapSize.second * nextCellSize) / 2f
+                val nextOffset = Offset(
+                    x = pointerPosition.x - centeredOriginX - focusedCellX * nextCellSize,
+                    y = pointerPosition.y - centeredOriginY - focusedCellY * nextCellSize
+                )
+
+                onScaleChange(nextScale)
+                onOffsetChange(nextOffset)
             }
             .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onOffsetChange(cameraOffset + dragAmount)
-                }
+                var currentDragOffset = Offset.Zero
+                detectDragGestures(
+                    onDragStart = { currentDragOffset = latestCameraOffset },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        currentDragOffset += dragAmount
+                        onOffsetChange(currentDragOffset)
+                    }
+                )
             }
             .pointerMoveFilter(
                 onMove = { position ->
