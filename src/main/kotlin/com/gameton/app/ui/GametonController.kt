@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.max
+import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -154,6 +155,7 @@ class GametonController(
                 _arenaState.value = arenaResponse.toArenaViewState()
                 val domainState = arenaResponse.toDomainModel()
                 analyzeArenaTransition(lastArenaSnapshot, domainState).forEach(::publishJournal)
+                analyzeCurrentArenaRisks(domainState).forEach(::publishJournal)
                 val turnNo = arenaResponse.turnNo
                 if (turnNo != lastProcessedTurnNo) {
                     val decision = withTimeoutOrNull(DECISION_TIMEOUT_MS.milliseconds) {
@@ -388,6 +390,55 @@ class GametonController(
         return records
     }
 
+    private fun analyzeCurrentArenaRisks(current: ArenaState): List<JournalRecord> {
+        val main = current.plantations.firstOrNull { it.isMain && !it.isIsolated } ?: return emptyList()
+        val mainCoord = main.position
+        val cellProgress = current.cells.firstOrNull { it.position == mainCoord }?.terraformationProgress ?: 0
+        val turnsToDisappear = turnsToDisappear(cellProgress)
+        val supportReady = orthogonalNeighbors(mainCoord).any { neighbor ->
+            current.plantations.any { !it.isMain && !it.isIsolated && it.position == neighbor }
+        }
+        if (turnsToDisappear > 3 || supportReady) return emptyList()
+
+        val reasons = mutableListOf<String>()
+        if (current.beavers.any { abs(it.position.x - mainCoord.x) <= 2 && abs(it.position.y - mainCoord.y) <= 2 }) {
+            reasons += "beavers are in attack radius"
+        }
+        if (current.meteoForecasts.any { it.kind == "earthquake" && (it.turnsUntil ?: Int.MAX_VALUE) <= 1 }) {
+            reasons += "earthquake is imminent"
+        }
+        if (current.meteoForecasts.any { forecast ->
+                forecast.kind.contains("sand", ignoreCase = true) &&
+                    forecast.forming != true &&
+                    (forecast.nextPosition ?: forecast.position)?.let { pos ->
+                        val radius = forecast.radius ?: return@let false
+                        abs(pos.x - mainCoord.x) <= radius && abs(pos.y - mainCoord.y) <= radius
+                    } == true
+            }
+        ) {
+            reasons += "sandstorm path crosses HQ"
+        }
+
+        return listOf(
+            JournalRecord(
+                timestamp = LocalDateTime.now(),
+                source = JournalSource.Analysis,
+                severity = if (turnsToDisappear <= 2) JournalSeverity.Critical else JournalSeverity.Warning,
+                title = "HQ relocation window",
+                message = buildString {
+                    append("Turn ${current.turnNo}: HQ cell is at $cellProgress% and may disappear in about $turnsToDisappear turn")
+                    if (turnsToDisappear != 1) append('s')
+                    append(", but no adjacent operational support plantation is ready.")
+                    if (reasons.isNotEmpty()) {
+                        append(" Extra pressure: ")
+                        append(reasons.joinToString(", "))
+                        append('.')
+                    }
+                }
+            )
+        )
+    }
+
     private fun publishJournal(record: JournalRecord) {
         logger.append(record)
         val formatter = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -408,6 +459,18 @@ class GametonController(
         }
     }
 }
+
+private fun turnsToDisappear(terraformProgress: Int, terraformSpeed: Int = 5): Int {
+    val remaining = (100 - terraformProgress).coerceAtLeast(0)
+    return if (remaining == 0) 0 else (remaining + terraformSpeed - 1) / terraformSpeed
+}
+
+private fun orthogonalNeighbors(point: com.gameton.app.domain.model.Coordinate): List<com.gameton.app.domain.model.Coordinate> = listOf(
+    com.gameton.app.domain.model.Coordinate(point.x, point.y - 1),
+    com.gameton.app.domain.model.Coordinate(point.x + 1, point.y),
+    com.gameton.app.domain.model.Coordinate(point.x, point.y + 1),
+    com.gameton.app.domain.model.Coordinate(point.x - 1, point.y)
+)
 
 private fun CommandRequestUi.isEmptyTurn(): Boolean {
     return command.isEmpty() && plantationUpgrade == null && relocateMain == null

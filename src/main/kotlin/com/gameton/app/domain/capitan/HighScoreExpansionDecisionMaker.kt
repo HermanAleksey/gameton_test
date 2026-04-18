@@ -19,6 +19,7 @@ private const val HS_BUILD_COMPLETION_HP = 50
 private const val HS_HQ_CRITICAL_HP = 18
 private const val HS_HQ_DANGER_HP = 28
 private const val HS_THREATENED_HP = 16
+private const val HS_BASE_HQ_TERRAFORM_BUFFER_TURNS = 3
 
 /**
  * Score-first strategy:
@@ -31,6 +32,7 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         const val HIGH_TERRAFORMATION_PROGRESS = 80
         const val MID_TERRAFORMATION_PROGRESS = 60
         const val HQ_RELOCATE_TURN_THRESHOLD = 2
+        const val HQ_EMERGENCY_SUPPORT_THRESHOLD = 3
         const val NORMAL_CELL_POINT_VALUE = 10
         const val BOOSTED_CELL_POINT_VALUE = 15
     }
@@ -225,7 +227,7 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
     ): HsHqPlan {
         val main = context.mainPlantation() ?: return HsHqPlan()
         val mainPoint = main.position.toUi()
-        val turnsToHqDisappear = turnsUntilDisappears(context.cellProgressAt(mainPoint), HS_BASE_TERRAFORM_SPEED)
+        val turnsToHqDisappear = context.turnsToMainDisappear
         val supportCandidates = hsNeighborCandidates(mainPoint)
             .mapNotNull { point ->
                 val plantation = context.ownPlantationByPosition[point] ?: return@mapNotNull null
@@ -255,9 +257,7 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         val authors = context.operationalAuthors.filter { it !in usedAuthors }
         if (authors.isEmpty()) return HsHqPlan()
 
-        val requiredSafetyMargin = 1 + if (context.isEarthquakeImminent()) 1 else 0
-        val dangerWindow = turnsToHqDisappear - requiredSafetyMargin
-        val emergency = dangerWindow <= 1
+        val emergency = context.requiresEmergencyHqSupport()
 
         val selected = planAssignmentsForTarget(
             target = target,
@@ -348,13 +348,13 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
             .sortedByDescending { it.score }
 
         val turnsToHqDisappear = main?.let {
-            turnsUntilDisappears(context.cellProgressAt(it.position.toUi()), HS_BASE_TERRAFORM_SPEED)
+            context.turnsToMainDisappear
         } ?: 0
 
         val hqCritical = when {
             main == null -> true
             main.hp <= HS_HQ_CRITICAL_HP -> true
-            turnsToHqDisappear <= HQ_RELOCATE_TURN_THRESHOLD &&
+            turnsToHqDisappear <= HQ_EMERGENCY_SUPPORT_THRESHOLD &&
                 hsNeighborCandidates(main.position.toUi()).none { it in context.nonMainOperationalOwnPositions } -> true
             context.isSevereDanger(main.position.toUi()) && main.hp <= HS_HQ_DANGER_HP -> true
             context.isEarthquakeImminent() && main.hp <= HS_HQ_DANGER_HP -> true
@@ -363,6 +363,7 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
 
         val mode = when {
             hqCritical -> HsMode.SURVIVAL
+            context.requiresEmergencyHqSupport() -> HsMode.SURVIVAL
             threatenedOwn.any { it.isMain && it.hp <= HS_HQ_DANGER_HP } -> HsMode.SURVIVAL
             pressureCandidates.isNotEmpty() -> HsMode.PRESSURE
             else -> HsMode.SCORE
@@ -503,6 +504,7 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         plannedNewTargets: Set<UiCoordinate>,
         safeOnly: Boolean
     ): HsPlannedActionCommand? {
+        if (context.shouldFreezeExpansionForHq(plannedNewTargets)) return null
         var best: HsScoredActionCandidate? = null
 
         for (author in context.operationalAuthors) {
@@ -632,6 +634,14 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         score += futureBranchingPotential(target, context) * 900
         score += ringAffinity(target) * 320
 
+        if (context.requiresEmergencyHqSupport()) {
+            if (context.isAdjacentToMain(target)) {
+                score += 15_000
+            } else if (targetType == HsTargetType.NEW_CONSTRUCTION) {
+                score -= 18_000
+            }
+        }
+
         when (targetType) {
             HsTargetType.EXISTING_CONSTRUCTION -> {
                 score += 18_000
@@ -755,10 +765,41 @@ private data class HsContext(
     val mainInSevereDanger: Boolean = mainPlantation()?.position?.toUi()?.let(::isSevereDanger) == true
     val nearSettlementCap: Boolean = activeSettlementCount >= effectiveSettlementLimit - 3
     val degradingCellCount: Int = state.cells.count { it.turnsUntilDegradation <= 8 }
+    val turnsToMainDisappear: Int = mainPlantation()?.position?.toUi()?.let { point ->
+        hsTurnsUntilDisappears(cellProgressAt(point), mainTerraformSpeed())
+    } ?: Int.MAX_VALUE
+    val hasAdjacentOperationalSupportForMain: Boolean = mainPlantation()?.position?.toUi()?.let { point ->
+        hsNeighborCandidates(point).any { it in nonMainOperationalOwnPositions }
+    } == true
 
     fun cellProgressAt(point: UiCoordinate): Int = cellByPosition[point]?.terraformationProgress ?: 0
 
     fun mainPlantation(): Plantation? = state.plantations.firstOrNull { it.isMain && !it.isIsolated }
+
+    fun isAdjacentToMain(target: UiCoordinate): Boolean {
+        val mainPoint = mainPlantation()?.position?.toUi() ?: return false
+        return hsNeighborCandidates(mainPoint).any { it == target }
+    }
+
+    fun requiresEmergencyHqSupport(): Boolean {
+        if (hasAdjacentOperationalSupportForMain) return false
+        return turnsToMainDisappear <= hqSupportDeadline()
+    }
+
+    fun shouldFreezeExpansionForHq(plannedNewTargets: Set<UiCoordinate>): Boolean {
+        if (!requiresEmergencyHqSupport()) return false
+        return plannedNewTargets.none { isAdjacentToMain(it) }
+    }
+
+    private fun hqSupportDeadline(): Int {
+        return HS_BASE_HQ_TERRAFORM_BUFFER_TURNS + if (isEarthquakeImminent()) 1 else 0
+    }
+
+    private fun mainTerraformSpeed(): Int {
+        return HS_BASE_TERRAFORM_SPEED + (
+            state.plantationUpgrades?.tiers?.firstOrNull { it.name == "terraform_speed" }?.current ?: 0
+            )
+    }
 
     fun isEarthquakeImminent(): Boolean {
         return state.meteoForecasts.any { it.kind == "earthquake" && (it.turnsUntil ?: Int.MAX_VALUE) <= 1 }
@@ -911,4 +952,9 @@ private fun hsChebyshevDistance(from: UiCoordinate, to: UiCoordinate): Int {
 private fun hsCeilDiv(value: Int, divisor: Int): Int {
     if (divisor <= 0) return Int.MAX_VALUE
     return (value + divisor - 1) / divisor
+}
+
+private fun hsTurnsUntilDisappears(progress: Int, terraformingSpeed: Int): Int {
+    val remaining = (100 - progress).coerceAtLeast(0)
+    return if (remaining == 0) 0 else hsCeilDiv(remaining, terraformingSpeed.coerceAtLeast(1))
 }
