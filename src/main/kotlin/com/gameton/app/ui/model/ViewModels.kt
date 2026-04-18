@@ -2,6 +2,8 @@ package com.gameton.app.ui.model
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import com.gameton.app.domain.capitan.StrategyId
+import com.gameton.app.network.DatsSolServer
 
 enum class TerrainType {
     Desert,
@@ -162,4 +164,14 @@ data class ArenaViewState(
     val alerts: List<AlertViewModel>,
     val layerToggles: List<MapLayerToggleState>,
     val legendItems: List<LegendItemViewModel>
+)
+
+data class ServerConnectionViewState(
+    val selectedServer: DatsSolServer,
+    val authTokenPreview: String
+)
+
+data class StrategySelectionViewState(
+    val selectedStrategy: StrategyId,
+    val availableStrategies: List<StrategyId>
 )

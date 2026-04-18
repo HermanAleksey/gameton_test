@@ -1,21 +1,18 @@
 package com.gameton.app.di
 
-import com.gameton.app.domain.capitan.DecisionMaker
-import com.gameton.app.domain.capitan.HighScoreExpansionDecisionMaker
-import com.gameton.app.network.RestApi
+import com.gameton.app.domain.capitan.StrategyRegistry
 import com.gameton.app.network.RestApiConfig
-import com.gameton.app.network.createRestApi
 import com.gameton.app.ui.GametonController
 
 class AppContainer(
     restApiConfig: RestApiConfig = RestApiConfig()
 ) {
-    val restApi: RestApi = createRestApi(restApiConfig)
-    val decisionMaker: DecisionMaker = HighScoreExpansionDecisionMaker()
-    val gametonController: GametonController = GametonController(restApi, decisionMaker)
+    val gametonController: GametonController = GametonController(
+        initialConfig = restApiConfig,
+        initialStrategy = StrategyRegistry.default()
+    )
 
     fun close() {
         gametonController.close()
-        restApi.close()
     }
 }

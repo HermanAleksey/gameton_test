@@ -59,6 +59,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.gameton.app.di.AppContainer
+import com.gameton.app.domain.capitan.StrategyId
+import com.gameton.app.network.DatsSolServer
 import com.gameton.app.ui.model.AlertViewModel
 import com.gameton.app.ui.model.ArenaViewState
 import com.gameton.app.ui.model.EntityKind
@@ -70,6 +72,8 @@ import com.gameton.app.ui.model.LegendItemViewModel
 import com.gameton.app.ui.model.MapCellViewModel
 import com.gameton.app.ui.model.MapLayerToggleState
 import com.gameton.app.ui.model.RiskSeverity
+import com.gameton.app.ui.model.ServerConnectionViewState
+import com.gameton.app.ui.model.StrategySelectionViewState
 import com.gameton.app.ui.model.TerrainType
 import com.gameton.app.ui.theme.DashboardPalette
 import com.gameton.app.ui.theme.DashboardTheme
@@ -90,6 +94,8 @@ private const val TARGET_VISIBLE_CELLS_ON_FOCUS = 48f
 fun GametonDesktopApp(appContainer: AppContainer) {
     DashboardTheme {
         val arena by appContainer.gametonController.arenaState.collectAsState()
+        val connection by appContainer.gametonController.connectionState.collectAsState()
+        val strategy by appContainer.gametonController.strategyState.collectAsState()
         var toggles by remember { mutableStateOf(arena.layerToggles.associate { it.kind to it.enabled }) }
         var selectedId by remember { mutableStateOf(arena.entities.firstOrNull { it.kind == EntityKind.MainPlantation }?.id) }
         var hoveredCell by remember { mutableStateOf<MapCellViewModel?>(null) }
@@ -115,7 +121,13 @@ fun GametonDesktopApp(appContainer: AppContainer) {
                     )
                 )
             ) {
-                TopStatusBar(arena)
+                TopStatusBar(
+                    arena = arena,
+                    connection = connection,
+                    strategy = strategy,
+                    onSelectServer = appContainer.gametonController::selectServer,
+                    onSelectStrategy = appContainer.gametonController::selectStrategy
+                )
                 Row(
                     modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -206,7 +218,13 @@ fun GametonDesktopApp(appContainer: AppContainer) {
 }
 
 @Composable
-private fun TopStatusBar(arena: ArenaViewState) {
+private fun TopStatusBar(
+    arena: ArenaViewState,
+    connection: ServerConnectionViewState,
+    strategy: StrategySelectionViewState,
+    onSelectServer: (DatsSolServer) -> Unit,
+    onSelectStrategy: (StrategyId) -> Unit
+) {
     Row(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(DashboardPalette.Panel)
             .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -218,6 +236,23 @@ private fun TopStatusBar(arena: ArenaViewState) {
         StatusPill("Next ${"%.2f".format(arena.nextTurnInSeconds)}s", DashboardPalette.Boosted)
         StatusPill("AR ${arena.actionRange}", DashboardPalette.Construction)
         StatusPill(arena.connectionState, DashboardPalette.Oasis)
+        Text("Server", color = DashboardPalette.TextMuted, style = MaterialTheme.typography.caption)
+        DatsSolServer.entries.forEach { server ->
+            ServerPill(
+                server = server,
+                selected = connection.selectedServer == server,
+                onClick = { onSelectServer(server) }
+            )
+        }
+        StatusPill(connection.authTokenPreview, DashboardPalette.TextMuted)
+        Text("Strategy", color = DashboardPalette.TextMuted, style = MaterialTheme.typography.caption)
+        strategy.availableStrategies.forEach { strategyId ->
+            StrategyPill(
+                strategy = strategyId,
+                selected = strategy.selectedStrategy == strategyId,
+                onClick = { onSelectStrategy(strategyId) }
+            )
+        }
         StatusPill("Own ${arena.ownCount}", DashboardPalette.Own)
         StatusPill("Enemy ${arena.enemyCount}", DashboardPalette.Enemy)
         StatusPill("Build ${arena.constructionCount}", DashboardPalette.Construction)
@@ -242,6 +277,40 @@ private fun StatusPill(text: String, color: Color) {
             .padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text(text, color = MaterialTheme.colors.onSurface, style = MaterialTheme.typography.caption)
+    }
+}
+
+@Composable
+private fun ServerPill(
+    server: DatsSolServer,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val color = if (selected) DashboardPalette.Boosted else DashboardPalette.TextMuted
+    Box(
+        modifier = Modifier.background(color.copy(alpha = if (selected) 0.24f else 0.12f), RoundedCornerShape(999.dp))
+            .border(1.dp, color.copy(alpha = if (selected) 0.8f else 0.35f), RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(server.title, color = MaterialTheme.colors.onSurface, style = MaterialTheme.typography.caption)
+    }
+}
+
+@Composable
+private fun StrategyPill(
+    strategy: StrategyId,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val color = if (selected) DashboardPalette.Main else DashboardPalette.TextMuted
+    Box(
+        modifier = Modifier.background(color.copy(alpha = if (selected) 0.24f else 0.12f), RoundedCornerShape(999.dp))
+            .border(1.dp, color.copy(alpha = if (selected) 0.8f else 0.35f), RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(strategy.title, color = MaterialTheme.colors.onSurface, style = MaterialTheme.typography.caption)
     }
 }
 

@@ -35,6 +35,27 @@ interface RestApi {
     fun close()
 }
 
+/**
+ * Server list matches the documented OpenAPI `servers` section:
+ * https://games-test.datsteam.dev/static/datssol/openapi/openapi.yml
+ */
+enum class DatsSolServer(
+    val baseUrl: String,
+    val title: String,
+    val description: String
+) {
+    Test(
+        baseUrl = "https://games-test.datsteam.dev/",
+        title = "TEST",
+        description = "Test server"
+    ),
+    Production(
+        baseUrl = "https://games.datsteam.dev/",
+        title = "PROD",
+        description = "Production server"
+    )
+}
+
 class KtorRestApi(
     private val baseUrl: String,
     private val authToken: String
@@ -101,13 +122,13 @@ class KtorRestApi(
 }
 
 data class RestApiConfig(
-    val baseUrl: String = "https://games-test.datsteam.dev/",
+    val server: DatsSolServer = DatsSolServer.Test,
     val authToken: String = "5b9c9054-08c4-43ba-a588-0fb445278ca4"
 )
 
 fun createRestApi(config: RestApiConfig = RestApiConfig()): RestApi {
     return KtorRestApi(
-        baseUrl = config.baseUrl,
+        baseUrl = config.server.baseUrl,
         authToken = config.authToken
     )
 }
