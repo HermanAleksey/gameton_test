@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.max
+import kotlin.time.Duration.Companion.milliseconds
 
 class GametonController(
     private val restApi: RestApi,
@@ -64,7 +65,7 @@ class GametonController(
                 _arenaState.value = arenaResponse.toArenaViewState()
                 val turnNo = arenaResponse.turnNo
                 if (turnNo != lastProcessedTurnNo) {
-                    val decision = withTimeoutOrNull(DECISION_TIMEOUT_MS) {
+                    val decision = withTimeoutOrNull(DECISION_TIMEOUT_MS.milliseconds) {
                         decisionMaker.makeTurn(arenaResponse.toDomainModel())
                     }
                     if (decision != null && !decision.isEmptyTurn()) {

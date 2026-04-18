@@ -1,7 +1,7 @@
 package com.gameton.app.di
 
 import com.gameton.app.domain.capitan.DecisionMaker
-import com.gameton.app.domain.capitan.StableExpansionDecisionMaker
+import com.gameton.app.domain.capitan.HighScoreExpansionDecisionMaker
 import com.gameton.app.network.RestApi
 import com.gameton.app.network.RestApiConfig
 import com.gameton.app.network.createRestApi
@@ -11,7 +11,7 @@ class AppContainer(
     restApiConfig: RestApiConfig = RestApiConfig()
 ) {
     val restApi: RestApi = createRestApi(restApiConfig)
-    val decisionMaker: DecisionMaker = StableExpansionDecisionMaker()
+    val decisionMaker: DecisionMaker = HighScoreExpansionDecisionMaker()
     val gametonController: GametonController = GametonController(restApi, decisionMaker)
 
     fun close() {
