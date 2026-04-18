@@ -46,18 +46,20 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.pointerMoveFilter
 import androidx.compose.ui.res.loadImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.layout.onSizeChanged
 import com.gameton.app.di.AppContainer
 import com.gameton.app.domain.capitan.StrategyId
 import com.gameton.app.network.DatsSolServer
@@ -89,6 +91,13 @@ private const val MIN_FOCUSED_ENTITY_ZOOM = 1.3f
 private const val MIN_CAMERA_ZOOM = 0.65f
 private const val MAX_CAMERA_ZOOM = 8f
 private const val TARGET_VISIBLE_CELLS_ON_FOCUS = 48f
+private const val MIN_GRID_CELL_SIZE = 4f
+private const val MIN_CELL_DECORATION_SIZE = 4f
+private const val MIN_ENTITY_DETAIL_CELL_SIZE = 7f
+private const val VIEWPORT_PADDING_CELLS = 1
+private val CELL_RISK_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(9f, 6f))
+private val ISOLATED_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+private val RANGE_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
 
 @Composable
 fun GametonDesktopApp(appContainer: AppContainer) {
@@ -407,16 +416,8 @@ private fun LegendItemCard(
                 color = if (pinned) severityColor(item.severity).copy(alpha = 0.7f) else Color(0x16FFF1D3),
                 shape = RoundedCornerShape(14.dp)
             )
-            .pointerMoveFilter(
-                onEnter = {
-                    onHover(item.highlightQuery)
-                    false
-                },
-                onExit = {
-                    onHover(null)
-                    false
-                }
-            )
+            .onPointerEvent(PointerEventType.Enter) { onHover(item.highlightQuery) }
+            .onPointerEvent(PointerEventType.Exit) { onHover(null) }
             .clickable { onPin(item.highlightQuery) }
             .padding(10.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -585,38 +586,47 @@ private fun TacticalMapCanvas(
     var canvasSize by remember { mutableStateOf(Size.Zero) }
     val latestCameraOffset by rememberUpdatedState(cameraOffset)
     val desertTile = remember { loadBundledImage(DESERT_TILE_RESOURCE) }
-    val filteredEntities = arena.entities.filter { entity ->
-        when {
-            layerToggles[LayerToggle.OnlyOwn] == true -> entity.kind in setOf(
-                EntityKind.OwnPlantation,
-                EntityKind.MainPlantation,
-                EntityKind.IsolatedPlantation,
-                EntityKind.Construction
-            )
-
-            layerToggles[LayerToggle.OnlyEnemy] == true -> entity.kind == EntityKind.EnemyPlantation
-            layerToggles[LayerToggle.OnlyThreats] == true -> entity.kind in setOf(
-                EntityKind.BeaverLair,
-                EntityKind.Sandstorm,
-                EntityKind.Earthquake,
-                EntityKind.IsolatedPlantation
-            )
-
-            layerToggles[LayerToggle.OnlyMeteo] == true -> entity.kind in setOf(
-                EntityKind.Sandstorm,
-                EntityKind.Earthquake
-            )
-
-            layerToggles[LayerToggle.Isolated] == true -> entity.kind == EntityKind.IsolatedPlantation
-            else -> true
+    var lastHoveredCellKey by remember { mutableStateOf<Long?>(null) }
+    var lastHoveredEntityId by remember { mutableStateOf<String?>(null) }
+    val renderState = remember(arena, layerToggles, activeHighlight, selectedId) {
+        buildMapRenderState(
+            arena = arena,
+            layerToggles = layerToggles,
+            activeHighlight = activeHighlight,
+            selectedId = selectedId
+        )
+    }
+    val viewport = remember(canvasSize, arena.mapSize, cameraScale, cameraOffset) {
+        computeMapViewport(
+            canvasSize = canvasSize,
+            mapSize = arena.mapSize,
+            cameraScale = cameraScale,
+            cameraOffset = cameraOffset
+        )
+    }
+    val visibleEntities = remember(renderState.filteredEntities, viewport.visibleRange) {
+        renderState.filteredEntities.filter { entity ->
+            viewport.visibleRange.contains(entity.position.x.toInt(), entity.position.y.toInt())
+        }
+    }
+    val handleHoverUpdate: (MapCellViewModel?, String?) -> Unit = { cell, entityId ->
+        val nextCellKey = cell?.let { coordKey(it.x, it.y) }
+        if (lastHoveredCellKey != nextCellKey) {
+            lastHoveredCellKey = nextCellKey
+            onHoverCell(cell)
+        }
+        if (lastHoveredEntityId != entityId) {
+            lastHoveredEntityId = entityId
+            onHoverEntity(entityId)
         }
     }
 
-    Canvas(
+    Box(
         modifier = modifier
+            .onSizeChanged { canvasSize = Size(it.width.toFloat(), it.height.toFloat()) }
             .onPointerEvent(PointerEventType.Scroll) {
                 val change = it.changes.firstOrNull() ?: return@onPointerEvent
-                if (canvasSize == Size.Zero) return@onPointerEvent
+                if (viewport.canvasSize == Size.Zero) return@onPointerEvent
 
                 val delta = change.scrollDelta.y
                 if (delta == 0f) return@onPointerEvent
@@ -625,20 +635,17 @@ private fun TacticalMapCanvas(
                 val nextScale = (previousScale * if (delta < 0f) 1.08f else 0.92f).coerceIn(MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM)
                 if (nextScale == previousScale) return@onPointerEvent
 
-                val baseCellSize = min(
-                    canvasSize.width / arena.mapSize.first,
-                    canvasSize.height / arena.mapSize.second
-                )
+                val baseCellSize = viewport.baseCellSize
                 val previousCellSize = baseCellSize * previousScale
                 val nextCellSize = baseCellSize * nextScale
 
-                val previousOrigin = mapOrigin(canvasSize, arena.mapSize, previousCellSize, cameraOffset)
+                val previousOrigin = mapOrigin(viewport.canvasSize, arena.mapSize, previousCellSize, cameraOffset)
                 val pointerPosition = change.position
                 val focusedCellX = (pointerPosition.x - previousOrigin.x) / previousCellSize
                 val focusedCellY = (pointerPosition.y - previousOrigin.y) / previousCellSize
 
-                val centeredOriginX = (canvasSize.width - arena.mapSize.first * nextCellSize) / 2f
-                val centeredOriginY = (canvasSize.height - arena.mapSize.second * nextCellSize) / 2f
+                val centeredOriginX = (viewport.canvasSize.width - arena.mapSize.first * nextCellSize) / 2f
+                val centeredOriginY = (viewport.canvasSize.height - arena.mapSize.second * nextCellSize) / 2f
                 val nextOffset = Offset(
                     x = pointerPosition.x - centeredOriginX - focusedCellX * nextCellSize,
                     y = pointerPosition.y - centeredOriginY - focusedCellY * nextCellSize
@@ -658,206 +665,46 @@ private fun TacticalMapCanvas(
                     }
                 )
             }
-            .pointerMoveFilter(
-                onMove = { position ->
-                    if (canvasSize == Size.Zero) return@pointerMoveFilter false
-                    val cellSize = min(
-                        canvasSize.width / arena.mapSize.first,
-                        canvasSize.height / arena.mapSize.second
-                    ) * cameraScale
-                    val origin = mapOrigin(canvasSize, arena.mapSize, cellSize, cameraOffset)
-                    val gx = floor((position.x - origin.x) / cellSize).toInt()
-                    val gy = floor((position.y - origin.y) / cellSize).toInt()
-                    val cell = arena.cells.firstOrNull { it.x == gx && it.y == gy }
-                    onHoverCell(cell)
-                    val entity = filteredEntities.lastOrNull {
-                        val left = origin.x + it.position.x * cellSize
-                        val top = origin.y + it.position.y * cellSize
-                        Rect(Offset(left, top), Size(cellSize, cellSize)).contains(position)
-                    }
-                    onHoverEntity(entity?.id)
-                    false
-                },
-                onExit = {
-                    onHoverCell(null)
-                    onHoverEntity(null)
-                    false
-                }
-            )
+            .onPointerEvent(PointerEventType.Move) { event ->
+                val position = event.changes.firstOrNull()?.position ?: return@onPointerEvent
+                val hovered = resolveHoveredTargets(position, viewport, renderState)
+                handleHoverUpdate(hovered.first, hovered.second)
+            }
+            .onPointerEvent(PointerEventType.Exit) {
+                handleHoverUpdate(null, null)
+            }
             .onPointerEvent(PointerEventType.Press) { event ->
                 val position = event.changes.firstOrNull()?.position ?: return@onPointerEvent
-                val cellSize =
-                    min(canvasSize.width / arena.mapSize.first, canvasSize.height / arena.mapSize.second) * cameraScale
-                val origin = mapOrigin(canvasSize, arena.mapSize, cellSize, cameraOffset)
-                val hit = filteredEntities.lastOrNull {
-                    val left = origin.x + it.position.x * cellSize
-                    val top = origin.y + it.position.y * cellSize
-                    Rect(Offset(left, top), Size(cellSize, cellSize)).contains(position)
-                }
-                onSelectEntity(hit?.id)
+                val hovered = resolveHoveredTargets(position, viewport, renderState)
+                onSelectEntity(hovered.second)
             }
     ) {
-        canvasSize = size
-        val cellSize = min(size.width / arena.mapSize.first, size.height / arena.mapSize.second) * cameraScale
-        val origin = mapOrigin(size, arena.mapSize, cellSize, cameraOffset)
+        Box(
+            modifier = Modifier.fillMaxSize().drawWithCache {
+                val cachedViewport = viewport
+                val cachedRenderState = renderState
+                onDrawBehind {
+                    drawStaticMap(
+                        viewport = cachedViewport,
+                        renderState = cachedRenderState,
+                        layerToggles = layerToggles,
+                        desertTile = desertTile
+                    )
+                }
+            }
+        )
 
-        clipRect {
-            drawRoundRect(
-                color = DashboardPalette.Desert.copy(alpha = 0.14f),
-                topLeft = Offset.Zero,
-                size = size,
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(24f, 24f)
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawDynamicMap(
+                viewport = viewport,
+                visibleEntities = visibleEntities,
+                selectedEntity = renderState.selectedEntity,
+                selectedId = selectedId,
+                hoveredEntityId = hoveredEntityId,
+                hoveredCell = hoveredCell,
+                highlightedEntityIds = renderState.highlightedEntityIds,
+                layerToggles = layerToggles
             )
-
-            arena.cells.forEach { cell ->
-                val topLeft = Offset(origin.x + cell.x * cellSize, origin.y + cell.y * cellSize)
-                val baseColor = when (cell.terrainType) {
-                    TerrainType.Desert -> DashboardPalette.Desert
-                    TerrainType.Mountain -> DashboardPalette.Mountain
-                    TerrainType.Oasis -> DashboardPalette.Desert
-                }
-                if (cell.terrainType == TerrainType.Desert || cell.terrainType == TerrainType.Oasis) {
-                    drawDesertTile(
-                        tile = desertTile,
-                        topLeft = topLeft,
-                        cellSize = cellSize,
-                        fallbackColor = baseColor.copy(alpha = 0.88f)
-                    )
-                } else {
-                    drawRect(
-                        color = baseColor.copy(alpha = 0.78f),
-                        topLeft = topLeft,
-                        size = Size(cellSize, cellSize)
-                    )
-                }
-
-                if (layerToggles[LayerToggle.Terraforming] == true && cell.terraformationProgress > 0 && cell.terrainType != TerrainType.Mountain) {
-                    val fillHeight = cellSize * (cell.terraformationProgress / 100f)
-                    drawRect(
-                        color = DashboardPalette.Oasis.copy(alpha = 0.88f),
-                        topLeft = Offset(topLeft.x, topLeft.y + cellSize - fillHeight),
-                        size = Size(cellSize, fillHeight)
-                    )
-                }
-
-                if (layerToggles[LayerToggle.BoostedCells] == true && cell.isBoosted) {
-                    val inset = cellSize * 0.13f
-                    val corner = cellSize * 0.2f
-                    drawLine(
-                        DashboardPalette.Boosted,
-                        Offset(topLeft.x + inset, topLeft.y + inset),
-                        Offset(topLeft.x + inset + corner, topLeft.y + inset),
-                        2f
-                    )
-                    drawLine(
-                        DashboardPalette.Boosted,
-                        Offset(topLeft.x + inset, topLeft.y + inset),
-                        Offset(topLeft.x + inset, topLeft.y + inset + corner),
-                        2f
-                    )
-                    drawLine(
-                        DashboardPalette.Boosted,
-                        Offset(topLeft.x + cellSize - inset, topLeft.y + cellSize - inset),
-                        Offset(topLeft.x + cellSize - inset - corner, topLeft.y + cellSize - inset),
-                        2f
-                    )
-                    drawLine(
-                        DashboardPalette.Boosted,
-                        Offset(topLeft.x + cellSize - inset, topLeft.y + cellSize - inset),
-                        Offset(topLeft.x + cellSize - inset, topLeft.y + cellSize - inset - corner),
-                        2f
-                    )
-                }
-
-                if (layerToggles[LayerToggle.Risks] == true && cell.riskLevel != RiskSeverity.None) {
-                    drawRect(
-                        color = severityColor(cell.riskLevel),
-                        topLeft = topLeft + Offset(1f, 1f),
-                        size = Size(cellSize - 2f, cellSize - 2f),
-                        style = Stroke(
-                            width = if (cell.riskLevel == RiskSeverity.Critical) 3f else 2f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(9f, 6f))
-                        )
-                    )
-                }
-
-                val isHighlighted = activeHighlight?.matches(cell) == true
-                if (isHighlighted) {
-                    drawRect(
-                        color = DashboardPalette.Boosted.copy(alpha = 0.22f),
-                        topLeft = topLeft,
-                        size = Size(cellSize, cellSize)
-                    )
-                }
-
-                if (hoveredCell?.x == cell.x && hoveredCell.y == cell.y) {
-                    drawRect(
-                        color = Color.White.copy(alpha = 0.08f),
-                        topLeft = topLeft,
-                        size = Size(cellSize, cellSize)
-                    )
-                    drawRect(
-                        Color.White.copy(alpha = 0.5f),
-                        topLeft = topLeft,
-                        size = Size(cellSize, cellSize),
-                        style = Stroke(2f)
-                    )
-                }
-            }
-
-            if (layerToggles[LayerToggle.Grid] == true) {
-                for (x in 0..arena.mapSize.first) {
-                    val dx = origin.x + x * cellSize
-                    drawLine(
-                        DashboardPalette.Grid,
-                        Offset(dx, origin.y),
-                        Offset(dx, origin.y + arena.mapSize.second * cellSize),
-                        1f
-                    )
-                }
-                for (y in 0..arena.mapSize.second) {
-                    val dy = origin.y + y * cellSize
-                    drawLine(
-                        DashboardPalette.Grid,
-                        Offset(origin.x, dy),
-                        Offset(origin.x + arena.mapSize.first * cellSize, dy),
-                        1f
-                    )
-                }
-            }
-
-            filteredEntities.forEach { entity ->
-                val topLeft = Offset(origin.x + entity.position.x * cellSize, origin.y + entity.position.y * cellSize)
-                val center = Offset(topLeft.x + cellSize / 2f, topLeft.y + cellSize / 2f)
-                drawEntity(entity, center, cellSize, selectedId, hoveredEntityId, activeHighlight, layerToggles)
-            }
-
-            if (layerToggles[LayerToggle.RangeAr] == true || layerToggles[LayerToggle.RangeSr] == true || layerToggles[LayerToggle.RangeVr] == true) {
-                arena.entities.firstOrNull { it.id == selectedId }?.let { entity ->
-                    val center = Offset(
-                        origin.x + entity.position.x * cellSize + cellSize / 2f,
-                        origin.y + entity.position.y * cellSize + cellSize / 2f
-                    )
-                    if (layerToggles[LayerToggle.RangeAr] == true) drawRange(
-                        center,
-                        cellSize,
-                        2,
-                        DashboardPalette.Construction
-                    )
-                    if (layerToggles[LayerToggle.RangeSr] == true) drawRange(
-                        center,
-                        cellSize,
-                        3,
-                        DashboardPalette.Boosted
-                    )
-                    if (layerToggles[LayerToggle.RangeVr] == true) drawRange(
-                        center,
-                        cellSize,
-                        3,
-                        DashboardPalette.Oasis.copy(alpha = 0.8f)
-                    )
-                }
-            }
         }
     }
 }
@@ -890,14 +737,223 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDesertTile(
     )
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEntity(
+private fun DrawScope.drawStaticMap(
+    viewport: MapViewport,
+    renderState: MapRenderState,
+    layerToggles: Map<LayerToggle, Boolean>,
+    desertTile: ImageBitmap?
+) {
+    if (viewport.canvasSize == Size.Zero) return
+
+    clipRect {
+        drawRoundRect(
+            color = DashboardPalette.Desert.copy(alpha = 0.14f),
+            topLeft = Offset.Zero,
+            size = viewport.canvasSize,
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(24f, 24f)
+        )
+
+        for (y in viewport.visibleRange.minY..viewport.visibleRange.maxY) {
+            for (x in viewport.visibleRange.minX..viewport.visibleRange.maxX) {
+                val cell = renderState.cellByCoord[coordKey(x, y)] ?: continue
+                val topLeft = Offset(
+                    viewport.origin.x + cell.x * viewport.cellSize,
+                    viewport.origin.y + cell.y * viewport.cellSize
+                )
+                val baseColor = when (cell.terrainType) {
+                    TerrainType.Desert -> DashboardPalette.Desert
+                    TerrainType.Mountain -> DashboardPalette.Mountain
+                    TerrainType.Oasis -> DashboardPalette.Desert
+                }
+
+                if (cell.terrainType == TerrainType.Desert || cell.terrainType == TerrainType.Oasis) {
+                    drawDesertTile(
+                        tile = desertTile,
+                        topLeft = topLeft,
+                        cellSize = viewport.cellSize,
+                        fallbackColor = baseColor.copy(alpha = 0.88f)
+                    )
+                } else {
+                    drawRect(
+                        color = baseColor.copy(alpha = 0.78f),
+                        topLeft = topLeft,
+                        size = Size(viewport.cellSize, viewport.cellSize)
+                    )
+                }
+
+                if (
+                    layerToggles[LayerToggle.Terraforming] == true &&
+                    cell.terraformationProgress > 0 &&
+                    cell.terrainType != TerrainType.Mountain
+                ) {
+                    val fillHeight = viewport.cellSize * (cell.terraformationProgress / 100f)
+                    drawRect(
+                        color = DashboardPalette.Oasis.copy(alpha = 0.88f),
+                        topLeft = Offset(topLeft.x, topLeft.y + viewport.cellSize - fillHeight),
+                        size = Size(viewport.cellSize, fillHeight)
+                    )
+                }
+
+                if (
+                    viewport.showCellDecorations &&
+                    layerToggles[LayerToggle.BoostedCells] == true &&
+                    cell.isBoosted
+                ) {
+                    val inset = viewport.cellSize * 0.13f
+                    val corner = viewport.cellSize * 0.2f
+                    drawLine(
+                        DashboardPalette.Boosted,
+                        Offset(topLeft.x + inset, topLeft.y + inset),
+                        Offset(topLeft.x + inset + corner, topLeft.y + inset),
+                        2f
+                    )
+                    drawLine(
+                        DashboardPalette.Boosted,
+                        Offset(topLeft.x + inset, topLeft.y + inset),
+                        Offset(topLeft.x + inset, topLeft.y + inset + corner),
+                        2f
+                    )
+                    drawLine(
+                        DashboardPalette.Boosted,
+                        Offset(topLeft.x + viewport.cellSize - inset, topLeft.y + viewport.cellSize - inset),
+                        Offset(topLeft.x + viewport.cellSize - inset - corner, topLeft.y + viewport.cellSize - inset),
+                        2f
+                    )
+                    drawLine(
+                        DashboardPalette.Boosted,
+                        Offset(topLeft.x + viewport.cellSize - inset, topLeft.y + viewport.cellSize - inset),
+                        Offset(topLeft.x + viewport.cellSize - inset, topLeft.y + viewport.cellSize - inset - corner),
+                        2f
+                    )
+                }
+
+                if (
+                    viewport.showCellDecorations &&
+                    layerToggles[LayerToggle.Risks] == true &&
+                    cell.riskLevel != RiskSeverity.None
+                ) {
+                    drawRect(
+                        color = severityColor(cell.riskLevel),
+                        topLeft = topLeft + Offset(1f, 1f),
+                        size = Size(viewport.cellSize - 2f, viewport.cellSize - 2f),
+                        style = Stroke(
+                            width = if (cell.riskLevel == RiskSeverity.Critical) 3f else 2f,
+                            pathEffect = CELL_RISK_PATH_EFFECT
+                        )
+                    )
+                }
+
+                if (coordKey(cell.x, cell.y) in renderState.highlightedCellKeys) {
+                    drawRect(
+                        color = DashboardPalette.Boosted.copy(alpha = 0.22f),
+                        topLeft = topLeft,
+                        size = Size(viewport.cellSize, viewport.cellSize)
+                    )
+                }
+            }
+        }
+
+        if (layerToggles[LayerToggle.Grid] == true && viewport.showGrid) {
+            for (x in viewport.visibleRange.minX..(viewport.visibleRange.maxX + 1)) {
+                val dx = viewport.origin.x + x * viewport.cellSize
+                drawLine(
+                    DashboardPalette.Grid,
+                    Offset(dx, viewport.origin.y + viewport.visibleRange.minY * viewport.cellSize),
+                    Offset(dx, viewport.origin.y + (viewport.visibleRange.maxY + 1) * viewport.cellSize),
+                    1f
+                )
+            }
+            for (y in viewport.visibleRange.minY..(viewport.visibleRange.maxY + 1)) {
+                val dy = viewport.origin.y + y * viewport.cellSize
+                drawLine(
+                    DashboardPalette.Grid,
+                    Offset(viewport.origin.x + viewport.visibleRange.minX * viewport.cellSize, dy),
+                    Offset(viewport.origin.x + (viewport.visibleRange.maxX + 1) * viewport.cellSize, dy),
+                    1f
+                )
+            }
+        }
+    }
+}
+
+private fun DrawScope.drawDynamicMap(
+    viewport: MapViewport,
+    visibleEntities: List<EntityViewModel>,
+    selectedEntity: EntityViewModel?,
+    selectedId: String?,
+    hoveredEntityId: String?,
+    hoveredCell: MapCellViewModel?,
+    highlightedEntityIds: Set<String>,
+    layerToggles: Map<LayerToggle, Boolean>
+) {
+    if (viewport.canvasSize == Size.Zero) return
+
+    clipRect {
+        hoveredCell?.takeIf { viewport.visibleRange.contains(it.x, it.y) }?.let { cell ->
+            val topLeft = Offset(
+                viewport.origin.x + cell.x * viewport.cellSize,
+                viewport.origin.y + cell.y * viewport.cellSize
+            )
+            drawRect(
+                color = Color.White.copy(alpha = 0.08f),
+                topLeft = topLeft,
+                size = Size(viewport.cellSize, viewport.cellSize)
+            )
+            drawRect(
+                Color.White.copy(alpha = 0.5f),
+                topLeft = topLeft,
+                size = Size(viewport.cellSize, viewport.cellSize),
+                style = Stroke(2f)
+            )
+        }
+
+        visibleEntities.forEach { entity ->
+            val topLeft = Offset(
+                viewport.origin.x + entity.position.x * viewport.cellSize,
+                viewport.origin.y + entity.position.y * viewport.cellSize
+            )
+            val center = Offset(topLeft.x + viewport.cellSize / 2f, topLeft.y + viewport.cellSize / 2f)
+            drawEntity(
+                entity = entity,
+                center = center,
+                cellSize = viewport.cellSize,
+                selectedId = selectedId,
+                hoveredEntityId = hoveredEntityId,
+                highlightedEntityIds = highlightedEntityIds,
+                layerToggles = layerToggles,
+                showEntityDetails = viewport.showEntityDetails
+            )
+        }
+
+        if (layerToggles[LayerToggle.RangeAr] == true || layerToggles[LayerToggle.RangeSr] == true || layerToggles[LayerToggle.RangeVr] == true) {
+            selectedEntity?.let { entity ->
+                val center = Offset(
+                    viewport.origin.x + entity.position.x * viewport.cellSize + viewport.cellSize / 2f,
+                    viewport.origin.y + entity.position.y * viewport.cellSize + viewport.cellSize / 2f
+                )
+                if (layerToggles[LayerToggle.RangeAr] == true) {
+                    drawRange(center, viewport.cellSize, 2, DashboardPalette.Construction)
+                }
+                if (layerToggles[LayerToggle.RangeSr] == true) {
+                    drawRange(center, viewport.cellSize, 3, DashboardPalette.Boosted)
+                }
+                if (layerToggles[LayerToggle.RangeVr] == true) {
+                    drawRange(center, viewport.cellSize, 3, DashboardPalette.Oasis.copy(alpha = 0.8f))
+                }
+            }
+        }
+    }
+}
+
+private fun DrawScope.drawEntity(
     entity: EntityViewModel,
     center: Offset,
     cellSize: Float,
     selectedId: String?,
     hoveredEntityId: String?,
-    activeHighlight: HighlightQuery?,
-    layerToggles: Map<LayerToggle, Boolean>
+    highlightedEntityIds: Set<String>,
+    layerToggles: Map<LayerToggle, Boolean>,
+    showEntityDetails: Boolean
 ) {
     val radius = cellSize * 0.25f
     val color = when (entity.kind) {
@@ -952,38 +1008,40 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEntity(
         else -> drawCircle(color, radius, center)
     }
 
-    entity.maxHp?.let { maxHp ->
-        entity.hp?.let { hp ->
-            val sweep = 360f * (hp / maxHp.toFloat())
-            drawArc(
-                color = Color.White.copy(alpha = 0.7f),
-                startAngle = -90f,
-                sweepAngle = sweep,
-                useCenter = false,
-                topLeft = Offset(center.x - radius * 1.7f, center.y - radius * 1.7f),
-                size = Size(radius * 3.4f, radius * 3.4f),
-                style = Stroke(3f)
+    if (showEntityDetails) {
+        entity.maxHp?.let { maxHp ->
+            entity.hp?.let { hp ->
+                val sweep = 360f * (hp / maxHp.toFloat())
+                drawArc(
+                    color = Color.White.copy(alpha = 0.7f),
+                    startAngle = -90f,
+                    sweepAngle = sweep,
+                    useCenter = false,
+                    topLeft = Offset(center.x - radius * 1.7f, center.y - radius * 1.7f),
+                    size = Size(radius * 3.4f, radius * 3.4f),
+                    style = Stroke(3f)
+                )
+            }
+        }
+
+        entity.progress?.let { progress ->
+            val width = radius * 2.3f
+            val progressWidth = width * (progress / 100f)
+            drawRect(
+                Color.White.copy(alpha = 0.18f),
+                Offset(center.x - width / 2f, center.y + radius * 1.25f),
+                Size(width, 5f)
+            )
+            drawRect(
+                DashboardPalette.Construction,
+                Offset(center.x - width / 2f, center.y + radius * 1.25f),
+                Size(progressWidth, 5f)
             )
         }
-    }
 
-    entity.progress?.let { progress ->
-        val width = radius * 2.3f
-        val progressWidth = width * (progress / 100f)
-        drawRect(
-            Color.White.copy(alpha = 0.18f),
-            Offset(center.x - width / 2f, center.y + radius * 1.25f),
-            Size(width, 5f)
-        )
-        drawRect(
-            DashboardPalette.Construction,
-            Offset(center.x - width / 2f, center.y + radius * 1.25f),
-            Size(progressWidth, 5f)
-        )
-    }
-
-    if (entity.isImmune) {
-        drawCircle(DashboardPalette.Oasis.copy(alpha = 0.28f), radius * 1.7f, center)
+        if (entity.isImmune) {
+            drawCircle(DashboardPalette.Oasis.copy(alpha = 0.28f), radius * 1.7f, center)
+        }
     }
 
     if (entity.kind == EntityKind.IsolatedPlantation) {
@@ -991,7 +1049,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEntity(
             DashboardPalette.Boosted,
             radius * 1.55f,
             center,
-            style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+            style = Stroke(width = 3f, pathEffect = ISOLATED_PATH_EFFECT)
         )
     }
 
@@ -1004,12 +1062,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEntity(
         )
     }
 
-    if (entity.id == selectedId || entity.id == hoveredEntityId || activeHighlight?.matches(entity) == true) {
+    if (entity.id == selectedId || entity.id == hoveredEntityId || entity.id in highlightedEntityIds) {
         drawCircle(Color.White.copy(alpha = 0.85f), radius * 2.35f, center, style = Stroke(3f))
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawRange(
+private fun DrawScope.drawRange(
     center: Offset,
     cellSize: Float,
     range: Int,
@@ -1025,7 +1083,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawRange(
         color = color.copy(alpha = 0.6f),
         topLeft = Offset(center.x - extent / 2f, center.y - extent / 2f),
         size = Size(extent, extent),
-        style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f)))
+        style = Stroke(width = 2f, pathEffect = RANGE_PATH_EFFECT)
     )
 }
 
@@ -1190,6 +1248,162 @@ private fun AlertRail(alerts: List<AlertViewModel>, modifier: Modifier = Modifie
     }
 }
 
+private data class MapRenderState(
+    val cellByCoord: Map<Long, MapCellViewModel>,
+    val entityByCoord: Map<Long, List<EntityViewModel>>,
+    val filteredEntities: List<EntityViewModel>,
+    val highlightedCellKeys: Set<Long>,
+    val highlightedEntityIds: Set<String>,
+    val selectedEntity: EntityViewModel?
+)
+
+private data class VisibleCellRange(
+    val minX: Int,
+    val maxX: Int,
+    val minY: Int,
+    val maxY: Int
+) {
+    fun contains(x: Int, y: Int): Boolean = x in minX..maxX && y in minY..maxY
+}
+
+private data class MapViewport(
+    val canvasSize: Size,
+    val baseCellSize: Float,
+    val cellSize: Float,
+    val origin: Offset,
+    val visibleRange: VisibleCellRange,
+    val showGrid: Boolean,
+    val showCellDecorations: Boolean,
+    val showEntityDetails: Boolean
+)
+
+private fun buildMapRenderState(
+    arena: ArenaViewState,
+    layerToggles: Map<LayerToggle, Boolean>,
+    activeHighlight: HighlightQuery?,
+    selectedId: String?
+): MapRenderState {
+    val filteredEntities = arena.entities.filter { entity -> entityMatchesActiveLayer(entity, layerToggles) }
+    val entityByCoord = buildMap<Long, MutableList<EntityViewModel>> {
+        filteredEntities.forEach { entity ->
+            getOrPut(coordKey(entity.position.x.toInt(), entity.position.y.toInt())) { mutableListOf() }.add(entity)
+        }
+    }.mapValues { it.value.toList() }
+    val cellByCoord = arena.cells.associateBy { coordKey(it.x, it.y) }
+    val highlightedCellKeys = if (activeHighlight != null) {
+        arena.cells.asSequence()
+            .filter { activeHighlight.matches(it) }
+            .map { coordKey(it.x, it.y) }
+            .toSet()
+    } else {
+        emptySet()
+    }
+    val highlightedEntityIds = if (activeHighlight != null) {
+        filteredEntities.asSequence()
+            .filter { activeHighlight.matches(it) }
+            .map { it.id }
+            .toSet()
+    } else {
+        emptySet()
+    }
+    return MapRenderState(
+        cellByCoord = cellByCoord,
+        entityByCoord = entityByCoord,
+        filteredEntities = filteredEntities,
+        highlightedCellKeys = highlightedCellKeys,
+        highlightedEntityIds = highlightedEntityIds,
+        selectedEntity = arena.entities.firstOrNull { it.id == selectedId }
+    )
+}
+
+private fun computeMapViewport(
+    canvasSize: Size,
+    mapSize: Pair<Int, Int>,
+    cameraScale: Float,
+    cameraOffset: Offset
+): MapViewport {
+    if (canvasSize == Size.Zero) {
+        return MapViewport(
+            canvasSize = Size.Zero,
+            baseCellSize = 0f,
+            cellSize = 0f,
+            origin = Offset.Zero,
+            visibleRange = VisibleCellRange(0, -1, 0, -1),
+            showGrid = false,
+            showCellDecorations = false,
+            showEntityDetails = false
+        )
+    }
+
+    val baseCellSize = min(canvasSize.width / mapSize.first, canvasSize.height / mapSize.second)
+    val cellSize = baseCellSize * cameraScale
+    val origin = mapOrigin(canvasSize, mapSize, cellSize, cameraOffset)
+    val minVisibleX = (((0f - origin.x) / cellSize).toInt() - VIEWPORT_PADDING_CELLS).coerceIn(0, mapSize.first - 1)
+    val maxVisibleX = (((canvasSize.width - origin.x) / cellSize).toInt() + VIEWPORT_PADDING_CELLS).coerceIn(0, mapSize.first - 1)
+    val minVisibleY = (((0f - origin.y) / cellSize).toInt() - VIEWPORT_PADDING_CELLS).coerceIn(0, mapSize.second - 1)
+    val maxVisibleY = (((canvasSize.height - origin.y) / cellSize).toInt() + VIEWPORT_PADDING_CELLS).coerceIn(0, mapSize.second - 1)
+
+    return MapViewport(
+        canvasSize = canvasSize,
+        baseCellSize = baseCellSize,
+        cellSize = cellSize,
+        origin = origin,
+        visibleRange = VisibleCellRange(minVisibleX, maxVisibleX, minVisibleY, maxVisibleY),
+        showGrid = cellSize >= MIN_GRID_CELL_SIZE,
+        showCellDecorations = cellSize >= MIN_CELL_DECORATION_SIZE,
+        showEntityDetails = cellSize >= MIN_ENTITY_DETAIL_CELL_SIZE
+    )
+}
+
+private fun resolveHoveredTargets(
+    position: Offset,
+    viewport: MapViewport,
+    renderState: MapRenderState
+): Pair<MapCellViewModel?, String?> {
+    val cell = resolveCellAtPosition(position, viewport, renderState) ?: return null to null
+    val entityId = renderState.entityByCoord[coordKey(cell.x, cell.y)]?.lastOrNull()?.id
+    return cell to entityId
+}
+
+private fun resolveCellAtPosition(
+    position: Offset,
+    viewport: MapViewport,
+    renderState: MapRenderState
+): MapCellViewModel? {
+    if (viewport.canvasSize == Size.Zero || viewport.cellSize <= 0f) return null
+    val gx = floor((position.x - viewport.origin.x) / viewport.cellSize).toInt()
+    val gy = floor((position.y - viewport.origin.y) / viewport.cellSize).toInt()
+    if (!viewport.visibleRange.contains(gx, gy)) return null
+    return renderState.cellByCoord[coordKey(gx, gy)]
+}
+
+private fun entityMatchesActiveLayer(entity: EntityViewModel, layerToggles: Map<LayerToggle, Boolean>): Boolean {
+    return when {
+        layerToggles[LayerToggle.OnlyOwn] == true -> entity.kind in setOf(
+            EntityKind.OwnPlantation,
+            EntityKind.MainPlantation,
+            EntityKind.IsolatedPlantation,
+            EntityKind.Construction
+        )
+
+        layerToggles[LayerToggle.OnlyEnemy] == true -> entity.kind == EntityKind.EnemyPlantation
+        layerToggles[LayerToggle.OnlyThreats] == true -> entity.kind in setOf(
+            EntityKind.BeaverLair,
+            EntityKind.Sandstorm,
+            EntityKind.Earthquake,
+            EntityKind.IsolatedPlantation
+        )
+
+        layerToggles[LayerToggle.OnlyMeteo] == true -> entity.kind in setOf(
+            EntityKind.Sandstorm,
+            EntityKind.Earthquake
+        )
+
+        layerToggles[LayerToggle.Isolated] == true -> entity.kind == EntityKind.IsolatedPlantation
+        else -> true
+    }
+}
+
 private fun HighlightQuery.matches(cell: MapCellViewModel): Boolean {
     if (terrainTypes.isNotEmpty() && cell.terrainType !in terrainTypes) return false
     if (boostedCells && !cell.isBoosted) return false
@@ -1293,6 +1507,8 @@ private fun distance(a: Offset, b: Offset): Float {
     val dy = a.y - b.y
     return dx * dx + dy * dy
 }
+
+private fun coordKey(x: Int, y: Int): Long = (x.toLong() shl 32) xor (y.toLong() and 0xffffffffL)
 
 private fun groupTitle(group: LegendGroup): String = when (group) {
     LegendGroup.Terrain -> "Террейн"
