@@ -62,12 +62,16 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.layout.onSizeChanged
 import com.gameton.app.di.AppContainer
 import com.gameton.app.domain.capitan.StrategyId
+import com.gameton.app.logging.JournalSeverity
+import com.gameton.app.logging.JournalSource
 import com.gameton.app.network.DatsSolServer
 import com.gameton.app.ui.model.AlertViewModel
 import com.gameton.app.ui.model.ArenaViewState
 import com.gameton.app.ui.model.EntityKind
 import com.gameton.app.ui.model.EntityViewModel
 import com.gameton.app.ui.model.HighlightQuery
+import com.gameton.app.ui.model.JournalEntryViewModel
+import com.gameton.app.ui.model.JournalViewState
 import com.gameton.app.ui.model.LayerToggle
 import com.gameton.app.ui.model.LegendGroup
 import com.gameton.app.ui.model.LegendItemViewModel
@@ -99,12 +103,19 @@ private val CELL_RISK_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(9f, 6
 private val ISOLATED_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
 private val RANGE_PATH_EFFECT = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
 
+private enum class SidebarMode {
+    Legend,
+    Journal,
+    Hidden
+}
+
 @Composable
 fun GametonDesktopApp(appContainer: AppContainer) {
     DashboardTheme {
         val arena by appContainer.gametonController.arenaState.collectAsState()
         val connection by appContainer.gametonController.connectionState.collectAsState()
         val strategy by appContainer.gametonController.strategyState.collectAsState()
+        val journal by appContainer.gametonController.journalState.collectAsState()
         var toggles by remember { mutableStateOf(arena.layerToggles.associate { it.kind to it.enabled }) }
         var selectedId by remember { mutableStateOf(arena.entities.firstOrNull { it.kind == EntityKind.MainPlantation }?.id) }
         var hoveredCell by remember { mutableStateOf<MapCellViewModel?>(null) }
@@ -114,6 +125,7 @@ fun GametonDesktopApp(appContainer: AppContainer) {
         var cameraScale by remember { mutableStateOf(1f) }
         var cameraOffset by remember { mutableStateOf(Offset.Zero) }
         var alertIndex by remember { mutableStateOf(0) }
+        var sidebarMode by remember { mutableStateOf(SidebarMode.Legend) }
 
         val selectedEntity = arena.entities.firstOrNull { it.id == selectedId }
         val activeHighlight = pinnedLegend ?: legendHover
@@ -141,19 +153,35 @@ fun GametonDesktopApp(appContainer: AppContainer) {
                     modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    LegendSidebar(
-                        legendItems = arena.legendItems,
-                        layerToggles = arena.layerToggles.map { it.copy(enabled = toggles[it.kind] == true) },
-                        pinnedLegend = pinnedLegend,
-                        onLegendHover = { legendHover = it },
-                        onLegendPin = {
-                            pinnedLegend = if (pinnedLegend == it) null else it
-                        },
-                        onToggleChanged = { kind, enabled ->
-                            toggles = toggles.toMutableMap().also { it[kind] = enabled }
-                        },
-                        modifier = Modifier.width(280.dp).fillMaxHeight()
-                    )
+                    when (sidebarMode) {
+                        SidebarMode.Legend -> LegendSidebar(
+                            legendItems = arena.legendItems,
+                            layerToggles = arena.layerToggles.map { it.copy(enabled = toggles[it.kind] == true) },
+                            pinnedLegend = pinnedLegend,
+                            sidebarMode = sidebarMode,
+                            onSelectSidebarMode = { sidebarMode = it },
+                            onLegendHover = { legendHover = it },
+                            onLegendPin = {
+                                pinnedLegend = if (pinnedLegend == it) null else it
+                            },
+                            onToggleChanged = { kind, enabled ->
+                                toggles = toggles.toMutableMap().also { it[kind] = enabled }
+                            },
+                            modifier = Modifier.width(280.dp).fillMaxHeight()
+                        )
+
+                        SidebarMode.Journal -> JournalSidebar(
+                            journal = journal,
+                            sidebarMode = sidebarMode,
+                            onSelectSidebarMode = { sidebarMode = it },
+                            modifier = Modifier.width(280.dp).fillMaxHeight()
+                        )
+
+                        SidebarMode.Hidden -> CollapsedSidebar(
+                            onExpand = { sidebarMode = SidebarMode.Legend },
+                            modifier = Modifier.width(48.dp).fillMaxHeight()
+                        )
+                    }
                     MapPanel(
                         arena = arena,
                         layerToggles = toggles,
@@ -279,6 +307,31 @@ private fun TopStatusBar(
 }
 
 @Composable
+private fun SidebarModePill(
+    mode: SidebarMode,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val color = if (selected) DashboardPalette.Construction else DashboardPalette.TextMuted
+    Box(
+        modifier = Modifier.background(color.copy(alpha = if (selected) 0.24f else 0.12f), RoundedCornerShape(999.dp))
+            .border(1.dp, color.copy(alpha = if (selected) 0.8f else 0.35f), RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(
+            when (mode) {
+                SidebarMode.Legend -> "Legend"
+                SidebarMode.Journal -> "Journal"
+                SidebarMode.Hidden -> "Hide"
+            },
+            color = MaterialTheme.colors.onSurface,
+            style = MaterialTheme.typography.caption
+        )
+    }
+}
+
+@Composable
 private fun StatusPill(text: String, color: Color) {
     Box(
         modifier = Modifier.background(color.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
@@ -329,6 +382,8 @@ private fun LegendSidebar(
     legendItems: List<LegendItemViewModel>,
     layerToggles: List<MapLayerToggleState>,
     pinnedLegend: HighlightQuery?,
+    sidebarMode: SidebarMode,
+    onSelectSidebarMode: (SidebarMode) -> Unit,
     onLegendHover: (HighlightQuery?) -> Unit,
     onLegendPin: (HighlightQuery) -> Unit,
     onToggleChanged: (LayerToggle, Boolean) -> Unit,
@@ -342,7 +397,11 @@ private fun LegendSidebar(
             .verticalScroll(scroll),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Легенда", style = MaterialTheme.typography.h6)
+        SidebarHeader(
+            title = "Легенда",
+            sidebarMode = sidebarMode,
+            onSelectSidebarMode = onSelectSidebarMode
+        )
         Text(
             "Всегда под рукой: hover подсвечивает тип на карте, click фиксирует фильтр.",
             style = MaterialTheme.typography.body2,
@@ -393,6 +452,118 @@ private fun LegendSidebar(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun JournalSidebar(
+    journal: JournalViewState,
+    sidebarMode: SidebarMode,
+    onSelectSidebarMode: (SidebarMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scroll = rememberScrollState()
+    Column(
+        modifier = modifier.background(DashboardPalette.Panel, RoundedCornerShape(22.dp))
+            .border(1.dp, Color(0x22FFF1D3), RoundedCornerShape(22.dp))
+            .padding(14.dp)
+            .verticalScroll(scroll),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        SidebarHeader(
+            title = "Журнал",
+            sidebarMode = sidebarMode,
+            onSelectSidebarMode = onSelectSidebarMode
+        )
+        Text(
+            "Локальный файл: ${journal.filePath}",
+            style = MaterialTheme.typography.caption,
+            color = DashboardPalette.TextMuted
+        )
+        if (journal.entries.isEmpty()) {
+            Text(
+                "Пока нет записей. После следующего poll/действия тут появятся события контроллера, сервера и аналитики.",
+                style = MaterialTheme.typography.body2,
+                color = DashboardPalette.TextMuted
+            )
+        } else {
+            journal.entries.forEach { entry ->
+                JournalEntryCard(entry)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SidebarHeader(
+    title: String,
+    sidebarMode: SidebarMode,
+    onSelectSidebarMode: (SidebarMode) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, style = MaterialTheme.typography.h6)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SidebarMode.entries.forEach { mode ->
+                    SidebarModePill(
+                        mode = mode,
+                        selected = sidebarMode == mode,
+                        onClick = { onSelectSidebarMode(mode) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsedSidebar(
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.background(DashboardPalette.Panel, RoundedCornerShape(22.dp))
+            .border(1.dp, Color(0x22FFF1D3), RoundedCornerShape(22.dp))
+            .padding(vertical = 14.dp, horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text("P", style = MaterialTheme.typography.subtitle2, color = DashboardPalette.Boosted)
+        SidebarModePill(
+            mode = SidebarMode.Legend,
+            selected = false,
+            onClick = onExpand
+        )
+    }
+}
+
+@Composable
+private fun JournalEntryCard(entry: JournalEntryViewModel) {
+    val color = journalSeverityColor(entry.severity)
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .background(MaterialTheme.colors.panelAlt.copy(alpha = 0.92f), RoundedCornerShape(14.dp))
+            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+            .padding(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier.size(10.dp)
+                .background(color, CircleShape)
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(entry.timestamp, style = MaterialTheme.typography.caption, color = DashboardPalette.TextMuted)
+                Text(entry.source.name, style = MaterialTheme.typography.overline, color = color)
+            }
+            Text(entry.title, style = MaterialTheme.typography.body2, fontWeight = FontWeight.SemiBold)
+            Text(entry.message, style = MaterialTheme.typography.caption, color = DashboardPalette.TextMuted)
         }
     }
 }
@@ -1003,6 +1174,9 @@ private fun DrawScope.drawEntity(
             drawCircle(color.copy(alpha = 0.2f), radius * 1.2f, center)
             drawLine(color, center + Offset(-radius, -radius), center + Offset(radius, radius), 4f)
             drawLine(color, center + Offset(radius, -radius), center + Offset(-radius, radius), 4f)
+            if (showEntityDetails) {
+                drawEarthquakeEffect(center, cellSize, color)
+            }
         }
 
         else -> drawCircle(color, radius, center)
@@ -1085,6 +1259,39 @@ private fun DrawScope.drawRange(
         size = Size(extent, extent),
         style = Stroke(width = 2f, pathEffect = RANGE_PATH_EFFECT)
     )
+}
+
+private fun DrawScope.drawEarthquakeEffect(
+    center: Offset,
+    cellSize: Float,
+    color: Color
+) {
+    val firstRing = cellSize * 1.8f
+    val secondRing = cellSize * 3.1f
+    val thirdRing = cellSize * 4.4f
+
+    drawCircle(color.copy(alpha = 0.16f), firstRing, center, style = Stroke(width = 3f))
+    drawCircle(color.copy(alpha = 0.12f), secondRing, center, style = Stroke(width = 2.5f))
+    drawCircle(color.copy(alpha = 0.08f), thirdRing, center, style = Stroke(width = 2f))
+
+    val crackHalfWidth = cellSize * 3.8f
+    val crackHalfHeight = cellSize * 2.6f
+    val crackPoints = listOf(
+        center + Offset(-crackHalfWidth, -crackHalfHeight * 0.55f),
+        center + Offset(-cellSize * 1.8f, -cellSize * 0.9f),
+        center + Offset(-cellSize * 0.8f, -cellSize * 0.25f),
+        center + Offset(cellSize * 0.4f, cellSize * 0.5f),
+        center + Offset(cellSize * 1.5f, cellSize * 0.95f),
+        center + Offset(crackHalfWidth, crackHalfHeight)
+    )
+    crackPoints.zipWithNext().forEachIndexed { index, (from, to) ->
+        drawLine(
+            color = color.copy(alpha = 0.22f - index * 0.02f),
+            start = from,
+            end = to,
+            strokeWidth = if (index == 0) 4f else 3f
+        )
+    }
 }
 
 @Composable
@@ -1509,6 +1716,13 @@ private fun distance(a: Offset, b: Offset): Float {
 }
 
 private fun coordKey(x: Int, y: Int): Long = (x.toLong() shl 32) xor (y.toLong() and 0xffffffffL)
+
+private fun journalSeverityColor(severity: JournalSeverity): Color = when (severity) {
+    JournalSeverity.Info -> DashboardPalette.Oasis
+    JournalSeverity.Warning -> DashboardPalette.Boosted
+    JournalSeverity.Error -> DashboardPalette.Enemy
+    JournalSeverity.Critical -> DashboardPalette.Earthquake
+}
 
 private fun groupTitle(group: LegendGroup): String = when (group) {
     LegendGroup.Terrain -> "Террейн"

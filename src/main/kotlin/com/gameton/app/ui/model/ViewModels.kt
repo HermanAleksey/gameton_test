@@ -3,6 +3,8 @@ package com.gameton.app.ui.model
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import com.gameton.app.domain.capitan.StrategyId
+import com.gameton.app.logging.JournalSeverity
+import com.gameton.app.logging.JournalSource
 import com.gameton.app.network.DatsSolServer
 
 enum class TerrainType {
@@ -174,4 +176,18 @@ data class ServerConnectionViewState(
 data class StrategySelectionViewState(
     val selectedStrategy: StrategyId,
     val availableStrategies: List<StrategyId>
+)
+
+data class JournalEntryViewModel(
+    val id: String,
+    val timestamp: String,
+    val source: JournalSource,
+    val severity: JournalSeverity,
+    val title: String,
+    val message: String
+)
+
+data class JournalViewState(
+    val filePath: String,
+    val entries: List<JournalEntryViewModel> = emptyList()
 )
