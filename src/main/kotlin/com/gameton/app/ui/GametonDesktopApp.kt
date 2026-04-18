@@ -1322,7 +1322,7 @@ private fun computeMapViewport(
     cameraScale: Float,
     cameraOffset: Offset
 ): MapViewport {
-    if (canvasSize == Size.Zero) {
+    if (canvasSize == Size.Zero || mapSize.first <= 0 || mapSize.second <= 0) {
         return MapViewport(
             canvasSize = Size.Zero,
             baseCellSize = 0f,

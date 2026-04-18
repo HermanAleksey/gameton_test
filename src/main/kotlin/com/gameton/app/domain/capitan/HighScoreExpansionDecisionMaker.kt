@@ -16,6 +16,9 @@ private const val HS_BASE_REPAIR_SPEED = 5
 private const val HS_BASE_SABOTAGE_POWER = 5
 private const val HS_BASE_TERRAFORM_SPEED = 5
 private const val HS_BUILD_COMPLETION_HP = 50
+private const val HS_HQ_CRITICAL_HP = 18
+private const val HS_HQ_DANGER_HP = 28
+private const val HS_THREATENED_HP = 16
 
 /**
  * Score-first strategy:
@@ -28,9 +31,6 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         const val HIGH_TERRAFORMATION_PROGRESS = 80
         const val MID_TERRAFORMATION_PROGRESS = 60
         const val HQ_RELOCATE_TURN_THRESHOLD = 2
-        const val HQ_CRITICAL_HP = 18
-        const val HQ_DANGER_HP = 28
-        const val THREATENED_HP = 16
         const val NORMAL_CELL_POINT_VALUE = 10
         const val BOOSTED_CELL_POINT_VALUE = 15
     }
@@ -117,35 +117,104 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         val upgrades = context.state.plantationUpgrades ?: return null
         if (upgrades.points <= 0) return null
 
-        val priority = buildList {
-            if (context.activeSettlementCount >= context.effectiveSettlementLimit - 3) {
-                add("settlement_limit")
-            }
-            if ((context.mainPlantation()?.hp ?: 0) <= HQ_DANGER_HP) {
-                add("max_hp")
-                add("repair_power")
-            }
-            if (context.isEarthquakeImminent()) {
-                add("earthquake_mitigation")
-            }
-            addAll(
-                listOf(
-                    "settlement_limit",
-                    "signal_range",
-                    "repair_power",
-                    "max_hp",
-                    "beaver_damage_mitigation",
-                    "earthquake_mitigation",
-                    "vision_range",
-                    "decay_mitigation"
-                )
-            )
-        }
+        val tieBreakPriority = listOf(
+            "settlement_limit",
+            "repair_power",
+            "max_hp",
+            "signal_range",
+            "beaver_damage_mitigation",
+            "earthquake_mitigation",
+            "vision_range",
+            "decay_mitigation"
+        )
 
-        val tierByName = upgrades.tiers.associateBy { it.name }
-        return priority.firstOrNull { name ->
-            val tier = tierByName[name] ?: return@firstOrNull false
-            tier.current < tier.max
+        val available = upgrades.tiers
+            .filter { it.current < it.max }
+            .map { it.name }
+
+        return available.maxWithOrNull(
+            compareBy<String>(
+                { scoreUpgrade(it, context) },
+                { -tieBreakPriority.indexOf(it).let { index -> if (index == -1) Int.MAX_VALUE else index } }
+            )
+        )?.takeIf { scoreUpgrade(it, context) > Int.MIN_VALUE / 2 }
+    }
+
+    private fun scoreUpgrade(name: String, context: HsContext): Int {
+        val mainHp = context.mainPlantation()?.hp ?: 0
+        val hqUnderPressure = mainHp <= HS_HQ_DANGER_HP || context.mainInSevereDanger
+        val severeThreat = mainHp <= HS_HQ_CRITICAL_HP || (context.isEarthquakeImminent() && mainHp <= HS_HQ_DANGER_HP)
+
+        return when (name) {
+            "settlement_limit" -> {
+                var score = 140
+                if (context.nearSettlementCap) score += 320
+                if (context.boostedFrontierTargetCount > 0) score += 90
+                score += minOf(context.safeFrontierTargetCount, 6) * 18
+                if (context.activeSettlementCount >= context.effectiveSettlementLimit - 1) score += 140
+                score
+            }
+
+            "repair_power" -> {
+                var score = 120
+                if (hqUnderPressure) score += 220
+                score += minOf(context.threatenedOperationalCount, 5) * 35
+                score += minOf(context.beaverThreatenedCount, 4) * 28
+                if (context.state.construction.isNotEmpty()) score += 35
+                if (severeThreat) score += 90
+                score
+            }
+
+            "max_hp" -> {
+                var score = 110
+                if (hqUnderPressure) score += 180
+                if (context.isEarthquakeImminent()) score += 120
+                if (context.mainInSevereDanger) score += 80
+                score += minOf(context.lowHpOperationalCount, 5) * 24
+                score
+            }
+
+            "signal_range" -> {
+                var score = 90
+                score += minOf(context.operationalPlantations.size, 12) * 10
+                score += minOf(context.frontierTargetCount, 6) * 8
+                if (context.boostedFrontierTargetCount > 0) score += 40
+                if (hqUnderPressure) score -= 70
+                if (context.nearSettlementCap) score -= 35
+                score
+            }
+
+            "beaver_damage_mitigation" -> {
+                var score = 70
+                score += minOf(context.beaverThreatenedCount, 6) * 40
+                if (context.mainBeaverThreatened) score += 90
+                if (context.beavers.isEmpty()) score -= 45
+                score
+            }
+
+            "earthquake_mitigation" -> {
+                var score = 60
+                if (context.isEarthquakeImminent()) score += 260
+                score += minOf(context.lowHpOperationalCount, 5) * 18
+                score += minOf(context.activeSettlementCount, 20) * 2
+                score
+            }
+
+            "vision_range" -> {
+                var score = 45
+                if (context.boostedFrontierTargetCount == 0 && context.safeFrontierTargetCount <= 2) score += 25
+                if (hqUnderPressure) score -= 35
+                score
+            }
+
+            "decay_mitigation" -> {
+                var score = 40
+                score += minOf(context.degradingCellCount, 6) * 14
+                if (context.state.construction.size >= 2) score += 30
+                score
+            }
+
+            else -> Int.MIN_VALUE
         }
     }
 
@@ -264,10 +333,10 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
         val threatenedOwn = context.operationalPlantations
             .filter { plantation ->
                 val point = plantation.position.toUi()
-                plantation.hp <= THREATENED_HP ||
-                    (plantation.isMain && plantation.hp <= HQ_DANGER_HP) ||
+                plantation.hp <= HS_THREATENED_HP ||
+                    (plantation.isMain && plantation.hp <= HS_HQ_DANGER_HP) ||
                     context.isSevereDanger(point) ||
-                    (context.isEarthquakeImminent() && plantation.hp <= HQ_DANGER_HP)
+                    (context.isEarthquakeImminent() && plantation.hp <= HS_HQ_DANGER_HP)
             }
             .sortedWith(compareBy<Plantation>({ !it.isMain }, { it.hp }, { it.position.x }, { it.position.y }))
 
@@ -284,17 +353,17 @@ class HighScoreExpansionDecisionMaker : DecisionMaker {
 
         val hqCritical = when {
             main == null -> true
-            main.hp <= HQ_CRITICAL_HP -> true
+            main.hp <= HS_HQ_CRITICAL_HP -> true
             turnsToHqDisappear <= HQ_RELOCATE_TURN_THRESHOLD &&
                 hsNeighborCandidates(main.position.toUi()).none { it in context.nonMainOperationalOwnPositions } -> true
-            context.isSevereDanger(main.position.toUi()) && main.hp <= HQ_DANGER_HP -> true
-            context.isEarthquakeImminent() && main.hp <= HQ_DANGER_HP -> true
+            context.isSevereDanger(main.position.toUi()) && main.hp <= HS_HQ_DANGER_HP -> true
+            context.isEarthquakeImminent() && main.hp <= HS_HQ_DANGER_HP -> true
             else -> false
         }
 
         val mode = when {
             hqCritical -> HsMode.SURVIVAL
-            threatenedOwn.any { it.isMain && it.hp <= HQ_DANGER_HP } -> HsMode.SURVIVAL
+            threatenedOwn.any { it.isMain && it.hp <= HS_HQ_DANGER_HP } -> HsMode.SURVIVAL
             pressureCandidates.isNotEmpty() -> HsMode.PRESSURE
             else -> HsMode.SCORE
         }
@@ -668,6 +737,24 @@ private data class HsContext(
         state.plantationUpgrades?.tiers?.firstOrNull { it.name == "settlement_limit" }?.current ?: 0
         )
     val activeSettlementCount: Int = state.plantations.size + state.construction.size
+    val frontierTargets: Set<UiCoordinate> = operationalOwnPositionsSorted
+        .asSequence()
+        .flatMap { output -> hsNeighborCandidates(output).asSequence() }
+        .filter { it.isBuildable(this) }
+        .toSet()
+    val safeFrontierTargetCount: Int = frontierTargets.count { !isDangerousExpansion(it) }
+    val boostedFrontierTargetCount: Int = frontierTargets.count { it.x % 7 == 0 && it.y % 7 == 0 }
+    val frontierTargetCount: Int = frontierTargets.size
+    val lowHpOperationalCount: Int = operationalPlantations.count { it.hp <= HS_HQ_DANGER_HP }
+    val threatenedOperationalCount: Int = operationalPlantations.count { plantation ->
+        val point = plantation.position.toUi()
+        plantation.hp <= HS_THREATENED_HP || isDangerousExpansion(point)
+    }
+    val beaverThreatenedCount: Int = operationalPlantations.count { isBeaverDanger(it.position.toUi()) }
+    val mainBeaverThreatened: Boolean = mainPlantation()?.position?.toUi()?.let(::isBeaverDanger) == true
+    val mainInSevereDanger: Boolean = mainPlantation()?.position?.toUi()?.let(::isSevereDanger) == true
+    val nearSettlementCap: Boolean = activeSettlementCount >= effectiveSettlementLimit - 3
+    val degradingCellCount: Int = state.cells.count { it.turnsUntilDegradation <= 8 }
 
     fun cellProgressAt(point: UiCoordinate): Int = cellByPosition[point]?.terraformationProgress ?: 0
 
